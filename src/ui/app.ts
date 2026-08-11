@@ -1,7 +1,8 @@
 import { clearNotices, notify } from '../core/notify.ts';
 import { cancelRun, runForTask, runTool } from '../core/runner.ts';
-import { discardChain, setState } from '../core/store.ts';
+import { discardChain, getTask, setState } from '../core/store.ts';
 import { taskTitle } from '../core/task.ts';
+import type { Task } from '../core/task.ts';
 import { feedStates, feeds, submit, toggleFeed } from '../feeds/index.ts';
 import { manualFeed } from '../feeds/manual.ts';
 import { tools } from '../tools/index.ts';
@@ -142,14 +143,19 @@ function newTask(): void {
   });
 }
 
-function startTool(tool: Tool): void {
-  const targets = targetTasks();
-  if (targets.length === 0) {
-    notify('info', 'no task selected');
+/**
+ * `targets` is captured by the caller at the moment the user chose, not read
+ * here: a feed can push a task into the pane while the picker or the input
+ * prompt is open, which reorders `incoming` under the cursor.
+ */
+function startTool(tool: Tool, targets: Task[] = targetTasks()): void {
+  const live = targets.filter((task) => getTask(task.id));
+  if (live.length === 0) {
+    notify('info', targets.length ? 'those tasks are gone' : 'no task selected');
     return;
   }
 
-  const chosen = tool.accepts === 'one' ? targets.slice(0, 1) : targets;
+  const chosen = tool.accepts === 'one' ? live.slice(0, 1) : live;
   const label =
     chosen.length === 1 ? taskTitle(chosen[0]!) : `${chosen.length} tasks`;
 
@@ -177,8 +183,7 @@ function startTool(tool: Tool): void {
   launch('');
 }
 
-function openTools(): void {
-  const targets = targetTasks();
+function openTools(targets: Task[] = targetTasks()): void {
   if (targets.length === 0) {
     notify('info', 'nothing to work on');
     return;
@@ -198,7 +203,7 @@ function openTools(): void {
         tool.accepts === 'one' && targets.length > 1
           ? `${tool.description} (first task only)`
           : tool.description,
-      run: () => startTool(tool),
+      run: () => startTool(tool, targets),
     })),
     subtitle,
   );
@@ -527,11 +532,14 @@ function handleViewer(key: Key, current: Extract<NonNullable<typeof overlay.valu
     case 'end':
       to(maxScroll);
       return;
-    case 'r':
-      // Run a tool straight from the viewer, on the task being read.
+    case 'r': {
+      // Run a tool straight from the viewer, on the task being read — not on
+      // whatever the cursor points at now, which may have shifted since.
+      const viewed = getTask(current.taskId);
       overlay.value = null;
-      openTools();
+      openTools(viewed ? [viewed] : []);
       return;
+    }
     default:
       return;
   }
