@@ -1,0 +1,33 @@
+create a cli application that takes in information via connections and assign them as tasks for cli applications.
+
+Example:
+1. get incoming slack notifications from websocket connection to incoming feed
+2. user process this task via this cli application (pipe notification to claude or other application)
+3. task is added to working queue until it is finished
+4. once task is completed add it back to incoming feed
+5. you can continue on task (go back to step 3) or mark it as complete
+
+Tasks TODO:
+* create a POC using chalk for cli ui and preact/signals for state management
+* add ui + data store for incoming feed
+	* allow incoming task to incoming feed
+* add ui + data store for working pool
+	* add notification when working a working queue is completed
+* add working tools:
+	* claude
+	* ghostty new tab
+	* git tool
+* add datasource feeds (converts responses to tasks):
+	* manual (just take user input)
+* add viewer to enlarge task:
+	* store entire history of the task (ie. from slack -> piped to claude -> spawned new tab to work on manually -> ran cli to run tests -> marked as completed)
+
+Boundaries:
+* anything within incoming feed and working pool has to be a task
+* when making a datasource feed, you must postprocess and convert it to a task
+* when making a working tool it requires:
+	* task(s), input (optional)
+	* pre-process function: allows you to adjust the task(s) and input 
+	* post-process function: return a task with process output
+* task data should be a json format so if process closes we can repopulate it back to incoming feed
+	* task structure should look something like this: { prev: string(uuid), next: string(uuid), data: string, created_at: string(ISO-8601), source: string }
