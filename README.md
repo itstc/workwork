@@ -34,15 +34,35 @@ workwork --help
 
 ## The board
 
-Three panes — **incoming feed**, **working pool**, **completed**.
+A **1 : 3 : 1** grid — the **incoming feed** on the left, the **detail** of
+whatever the cursor is on in the middle, the **working pool** on the right.
+Completed tasks are not a column: they live in a flyout that drops out of the
+`done` button in the top-left corner.
 
 ```
- workwork · 5 incoming  ·  1 working  ·  0 done
- feeds ● websocket (connected)  ○ manual                                   1 running
-╭─ 1 INCOMING FEED 5 ──────────────╮ ╭─ 2 WORKING POOL 1 ───────────────╮ ╭─ 3 COMPLETED 0 ──╮
-│ ▸ dana: prod deploy is stuck on… │ │   Fix the flaky checkout test    │ │ nothing yet      │
-│   websocket · 2m                 │ │   ⠙ claude 12.4s  reading src/…  │ │                  │
+ workwork  ▸ done 2 [3]  ·  5 incoming  ·  1 working
+ feeds ● websocket (connected)  ○ manual                                                  1 running
+╭─ 1 INCOMING FEED 5 ╮ ╭─ TASK DETAIL ─────────────────────────────────────╮ ╭─ 2 WORKING POOL 1 ╮
+│ ▸ dana: prod depl… │ │ dana: prod deploy is stuck on the migration step  │ │ ▸ Fix the flaky … │
+│   websocket · 2m   │ │ [incoming] · websocket · 2m ago · 3 steps         │ │   ⠙ claude 12.4s  │
+│   review the pric… │ │                                                   │ │                   │
+│   manual · 14m     │ │ the rollout has been pending for 20 minutes and   │ │                   │
+│                    │ │ the pod is CrashLooping.                          │ │                   │
 ```
+
+Pressing `3` (or `esc` to close) hangs the completed list over the feed column:
+
+```
+╭─ ▾ COMPLETED 2 ────╮ ╭─ TASK DETAIL ─────────────────────────────────────╮
+│ ▸ shipped the hot… │ │ shipped the hotfix                                │
+│   manual · 4m      │ │ [done] · manual · 4m ago · 5 steps                │
+╰────────────────────╯ │                                                   │
+```
+
+The middle column is the board's reading surface: title, state, source, chain
+depth, the task's whole text, its `meta`, and — while a tool is running — the
+live tail of its output, which keeps its slice of the panel even when the text
+above has to be trimmed. `⏎` still opens the full chain in the viewer.
 
 Running tools stream their output into the working pane as they go, and raise a
 notification (plus a bell) when they finish.
@@ -50,12 +70,14 @@ notification (plus a bell) when they finish.
 | key | |
 | --- | --- |
 | `↑ ↓` / `j k` | move within a pane |
-| `← →` / `h l` / `tab` | switch pane (`1` `2` `3` to jump) |
+| `← →` / `h l` / `tab` | switch pane — incoming ⇄ working (`1` `2` to jump) |
+| `3` | open the completed flyout (`esc` closes it) |
 | `g` / `G` | top / bottom |
 | `n` | new task via the manual feed |
 | `⏎` | open the viewer — the task's whole history |
 | `space` | add to a multi-selection |
 | `r` | run a tool on the task(s); `c` is a shortcut for claude |
+| `⏎` (in the viewer) | copy the ticked steps — or the one under the cursor — to the clipboard |
 | `d` / `u` | mark complete / send back to the feed |
 | `x` | cancel a running tool, or delete a task and its history |
 | `f` | data sources — start/stop connections |
@@ -64,7 +86,10 @@ notification (plus a bell) when they finish.
 
 The viewer is where a task's life is legible: a slack message that got piped to
 claude, handed to a Ghostty tab, then had `git` run against it shows up as four
-linked steps with every process transcript intact.
+linked steps with every process transcript intact. Inside it, `↑ ↓` moves
+between steps, `space` ticks the ones you want (`a` ticks all), and `⏎` pipes
+their text through `pbcopy` — with nothing ticked it copies the step under the
+cursor.
 
 ## The task model
 
@@ -171,9 +196,25 @@ Register it in `src/tools/index.ts`. Shipped tools:
 
 | tool | what it does |
 | --- | --- |
-| **claude** | pipes the task into `claude -p` and brings the response back as the next task |
+| **claude** | a conversation: the message you type becomes a task in the working pool, claude's reply comes back to the feed, and replying again resumes the same claude session |
 | **ghostty tab** | opens a Ghostty tab `cd`'d into the right directory with the task text printed, to work by hand |
 | **git** | runs a git command and staples the output onto the task(s); works on a multi-selection |
+
+### Talking to claude
+
+claude runs one process per turn, so a long conversation never holds the board
+hostage. Selecting a task and pressing `c` asks for a message — it's required,
+because the message *is* the stdin claude works from:
+
+    slack ──▸ [you: take a look] ──▸ [claude: which cluster?] ──▸ [you: staging] ──▸ …
+               working pool             incoming feed              working pool
+
+Each reply carries the claude session id in its meta, and the next turn resumes
+that session with `--resume`, so claude keeps everything it has already said.
+The first turn opens a session with `--session-id` and hands it the chain so far
+as context. If a session has gone missing — pruned history, a different working
+directory — the run falls back to a fresh session carrying the whole chain
+rather than stranding the conversation, and notes `resumed_from` on the result.
 
 The Ghostty hand-off tries a real new tab via AppleScript first (needs
 Accessibility permission for your terminal), falls back to a new window via
@@ -188,6 +229,7 @@ lot — it's invoked with the generated launcher script as its argument.
 | `WORKWORK_WS_URL` | websocket feed source; setting it enables the feed |
 | `WORKWORK_CLAUDE_BIN` / `WORKWORK_CLAUDE_ARGS` | claude executable and extra `-p` args |
 | `WORKWORK_CLAUDE_TIMEOUT_MS` | default 10 minutes |
+| `WORKWORK_COPY_BIN` / `WORKWORK_COPY_ARGS` | clipboard command for the viewer (default `pbcopy`) |
 | `WORKWORK_GIT_CWD` | repo the git tool runs in (default: cwd) |
 | `WORKWORK_GHOSTTY_BIN` / `WORKWORK_TERMINAL_CMD` | terminal hand-off |
 | `WORKWORK_DESKTOP_NOTIFY` | `1` to also raise macOS notifications on completion |
@@ -229,8 +271,9 @@ Verified end to end, both headlessly and by driving the real binary under a pty:
   tail live, multi-step chains render in the viewer
 - cancellation (`x`) tears down the child process and still records a task
 - crash recovery (in-flight tasks return to the feed) and corrupt-state handling
-- layout geometry at 110/84/70/44 columns — every row exact width, borders
-  aligned, panes collapsing 3 → 2 → 1
+- layout geometry at 140/110/84/70/64/50/44 columns, board and flyout alike —
+  every row exact width, borders aligned, the grid collapsing feed + detail +
+  pool → focused list + detail → one list as the terminal narrows
 - `claude` against a stub binary; `git` against a real repo; `add`/`ls`/`--help`
 
 `tsc --noEmit` is clean.

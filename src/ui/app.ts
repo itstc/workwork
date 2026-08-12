@@ -1,7 +1,8 @@
+import { copyToClipboard } from '../core/clipboard.ts';
 import { clearNotices, notify } from '../core/notify.ts';
 import { cancelRun, runForTask, runTool } from '../core/runner.ts';
-import { discardChain, getTask, setState } from '../core/store.ts';
-import { taskTitle } from '../core/task.ts';
+import { discardChain, done, getTask, setState } from '../core/store.ts';
+import { chainOf, taskTitle } from '../core/task.ts';
 import type { Task } from '../core/task.ts';
 import { feedStates, feeds, submit, toggleFeed } from '../feeds/index.ts';
 import { manualFeed } from '../feeds/manual.ts';
@@ -19,11 +20,12 @@ import type { Key } from './keys.ts';
 import { isPrintable } from './keys.ts';
 import { panelHeight, renderHelp, renderPanel, renderViewer } from './overlays.ts';
 import { size, tick } from './screen.ts';
-import type { MenuItem } from './state.ts';
+import type { MenuItem, ViewerOverlay } from './state.ts';
 import {
   clearSelection,
   cursorTask,
   cyclePane,
+  doneOpen,
   focusPane,
   focusedList,
   focusedPane,
@@ -32,6 +34,7 @@ import {
   selection,
   setCursor,
   targetTasks,
+  toggleDone,
   toggleSelected,
 } from './state.ts';
 import { t } from './theme.ts';
@@ -61,9 +64,11 @@ export function render(): string[] {
       total > bodyHeight
         ? `${current.scroll + 1}–${Math.min(total, current.scroll + bodyHeight)} of ${total}`
         : 'all';
+    const ticked = current.picked.length;
     return frame(cols, rows, lines, [
-      ['↑↓', 'scroll'],
-      ['g G', 'top/bottom'],
+      ['↑↓', 'step'],
+      ['space', ticked ? `ticked ${ticked}` : 'tick'],
+      ['⏎', ticked ? `copy ${ticked}` : 'copy step'],
       ['esc', 'close'],
       ['', t.dim(position)],
     ]);
@@ -102,8 +107,9 @@ function boardHints(): [string, string][] {
     ['r', count > 0 ? `run on ${count}` : 'run tool'],
   ];
   if (pane === 'working') hints.push(['x', 'cancel']);
-  else if (pane === 'done') hints.push(['u', 'reopen']);
+  else if (pane === 'done') hints.push(['u', 'reopen'], ['3 / esc', 'close']);
   else hints.push(['d', 'complete']);
+  if (pane !== 'done') hints.push(['3', 'done']);
   hints.push(['f', 'feeds'], ['?', 'help'], ['q', 'quit']);
   return hints;
 }
@@ -135,7 +141,7 @@ function newTask(): void {
     onSubmit: (value) => {
       const created = submit(manualFeed, value);
       if (created.length) {
-        focusPane(0);
+        focusPane('incoming');
         setCursor('incoming', 0);
         notify('info', `added ${created.length} task${created.length === 1 ? '' : 's'}`);
       }
@@ -162,21 +168,27 @@ function startTool(tool: Tool, targets: Task[] = targetTasks()): void {
   const launch = (input: string) => {
     clearSelection();
     overlay.value = null;
-    focusPane(1);
+    focusPane('working');
     void runTool(tool, chosen, input);
   };
 
   if (tool.input) {
-    prompt(`${tool.name} — ${label}`, {
-      hint: `${tool.input.prompt}${tool.input.placeholder ? `  (default: ${tool.input.placeholder})` : ''}`,
-      onSubmit: (value) => {
-        if (tool.input?.required && !value.trim()) {
-          notify('error', `${tool.name} needs ${tool.input.prompt.toLowerCase()}`);
-          return;
-        }
-        launch(value);
-      },
-    });
+    const ask = () => {
+      prompt(`${tool.name} — ${label}`, {
+        hint: `${tool.input?.prompt}${tool.input?.placeholder ? `  (default: ${tool.input.placeholder})` : ''}`,
+        onSubmit: (value) => {
+          if (tool.input?.required && !value.trim()) {
+            notify('error', `${tool.name} needs ${tool.input.prompt.toLowerCase()}`);
+            // Required means required — keep asking rather than dropping them
+            // back on the board with nothing started.
+            ask();
+            return;
+          }
+          launch(value);
+        },
+      });
+    };
+    ask();
     return;
   }
 
@@ -259,6 +271,8 @@ function reopenTask(): void {
   if (!targets.length) return;
   for (const task of targets) setState(task.id, 'incoming');
   clearSelection();
+  // Emptying the flyout by reopening everything should not leave it hanging.
+  if (doneOpen.value && done.value.length === 0) toggleDone();
   notify('info', `back in the feed: ${targets.length}`);
 }
 
@@ -286,7 +300,56 @@ function cancelOrDelete(): void {
 function openViewer(): void {
   const task = cursorTask.value;
   if (!task) return;
-  overlay.value = { kind: 'viewer', taskId: task.id, scroll: 0 };
+  // Start on the step the board cursor was pointing at, not the root.
+  const chain = chainOf(task, getTask);
+  const pick = Math.max(0, chain.findIndex((node) => node.id === task.id));
+  const opened: ViewerOverlay = { kind: 'viewer', taskId: task.id, scroll: 0, pick, picked: [] };
+  overlay.value = { ...opened, scroll: scrollForStep(opened, pick) };
+}
+
+/** The steps a viewer action applies to: the ticked ones, else the cursor's. */
+function viewerSteps(current: ViewerOverlay): Task[] {
+  const task = getTask(current.taskId);
+  if (!task) return [];
+  const chain = chainOf(task, getTask);
+  const ticked = chain.filter((node) => current.picked.includes(node.id));
+  if (ticked.length) return ticked;
+  const cursor = chain[Math.min(Math.max(0, current.pick), chain.length - 1)];
+  return cursor ? [cursor] : [];
+}
+
+function copyViewerSteps(current: ViewerOverlay): void {
+  const steps = viewerSteps(current);
+  if (!steps.length) {
+    notify('error', 'nothing to copy — that task is gone');
+    return;
+  }
+
+  const text = steps.map((step) => step.data.replace(/\s+$/, '')).join('\n\n');
+  void copyToClipboard(text).then((result) => {
+    if (!result.ok) {
+      notify('error', `copy failed: ${result.error}`);
+      return;
+    }
+    const what = steps.length === 1 ? taskTitle(steps[0]!) : `${steps.length} steps`;
+    notify('success', `copied ${what} (${text.length} chars)`);
+  });
+}
+
+/** Scroll that brings step `index` into view, moving as little as it can. */
+function scrollForStep(current: ViewerOverlay, index: number): number {
+  const { rows, cols } = size.value;
+  const viewport = Math.max(1, rows - 3);
+  const { total, steps } = renderViewer({ ...current, scroll: 0 }, cols, viewport);
+  const maxScroll = Math.max(0, total - viewport);
+  const scroll = Math.min(maxScroll, Math.max(0, current.scroll));
+
+  const step = steps[index];
+  if (!step) return scroll;
+  if (step.start < scroll) return step.start;
+  // A step taller than the viewport pins to its head rather than its tail.
+  if (step.end > scroll + viewport) return Math.min(step.start, Math.max(0, step.end - viewport));
+  return scroll;
 }
 
 // --- input -----------------------------------------------------------------
@@ -346,13 +409,13 @@ function handleBoard(key: Key): void {
       cyclePane(key.shift ? -1 : 1);
       return;
     case '1':
-      focusPane(0);
+      focusPane('incoming');
       return;
     case '2':
-      focusPane(1);
+      focusPane('working');
       return;
     case '3':
-      focusPane(2);
+      toggleDone();
       return;
     case 'space': {
       const task = cursorTask.value;
@@ -363,8 +426,12 @@ function handleBoard(key: Key): void {
       return;
     }
     case 'escape':
-      clearSelection();
-      clearNotices();
+      // The flyout is the outermost thing esc should shut, ahead of ticks.
+      if (doneOpen.value) toggleDone();
+      else {
+        clearSelection();
+        clearNotices();
+      }
       return;
     case 'return':
       openViewer();
@@ -492,30 +559,58 @@ function handleMenu(key: Key, current: Extract<NonNullable<typeof overlay.value>
   }
 }
 
-function handleViewer(key: Key, current: Extract<NonNullable<typeof overlay.value>, { kind: 'viewer' }>): void {
+function handleViewer(key: Key, current: ViewerOverlay): void {
   const { rows, cols } = size.value;
   const viewport = Math.max(1, rows - 3);
   // Ask the renderer how tall the chain is so scrolling can never run past it.
-  const total = renderViewer({ ...current, scroll: 0 }, cols, viewport).total;
+  const { total, steps } = renderViewer({ ...current, scroll: 0 }, cols, viewport);
   const maxScroll = Math.max(0, total - viewport);
+  const pick = Math.min(Math.max(0, current.pick), Math.max(0, steps.length - 1));
 
   const to = (value: number) => {
-    overlay.value = { ...current, scroll: Math.min(maxScroll, Math.max(0, value)) };
+    overlay.value = { ...current, pick, scroll: Math.min(maxScroll, Math.max(0, value)) };
+  };
+
+  // Moving the step cursor drags the viewport along with it.
+  const toStep = (index: number) => {
+    const next = Math.min(Math.max(0, index), Math.max(0, steps.length - 1));
+    overlay.value = { ...current, pick: next, scroll: scrollForStep(current, next) };
   };
 
   switch (key.name) {
     case 'escape':
+      // First esc drops the ticks, second closes — same as the board.
+      if (current.picked.length) overlay.value = { ...current, picked: [] };
+      else overlay.value = null;
+      return;
     case 'q':
-    case 'return':
       overlay.value = null;
       return;
+    case 'return':
+      copyViewerSteps({ ...current, pick });
+      return;
+    case 'space': {
+      const step = steps[pick];
+      if (!step) return;
+      const picked = current.picked.includes(step.id)
+        ? current.picked.filter((id) => id !== step.id)
+        : [...current.picked, step.id];
+      const next = Math.min(pick + 1, Math.max(0, steps.length - 1));
+      overlay.value = { ...current, picked, pick: next, scroll: scrollForStep(current, next) };
+      return;
+    }
+    case 'a': {
+      const all = steps.length > 0 && current.picked.length === steps.length;
+      overlay.value = { ...current, pick, picked: all ? [] : steps.map((step) => step.id) };
+      return;
+    }
     case 'up':
     case 'k':
-      to(current.scroll - 1);
+      toStep(pick - 1);
       return;
     case 'down':
     case 'j':
-      to(current.scroll + 1);
+      toStep(pick + 1);
       return;
     case 'pageup':
       to(current.scroll - viewport + 2);
@@ -524,7 +619,7 @@ function handleViewer(key: Key, current: Extract<NonNullable<typeof overlay.valu
       to(current.scroll + viewport - 2);
       return;
     case 'g':
-      to(key.shift ? maxScroll : 0);
+      toStep(key.shift ? steps.length - 1 : 0);
       return;
     case 'home':
       to(0);

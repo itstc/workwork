@@ -42,6 +42,13 @@ export const stateLabel: Record<TaskState, string> = {
   done: 'COMPLETED',
 };
 
+/** Used when a column is too narrow for the full label. */
+export const stateShort: Record<TaskState, string> = {
+  incoming: 'INCOMING',
+  working: 'WORKING',
+  done: 'DONE',
+};
+
 export const box = {
   tl: '╭',
   tr: '╮',

@@ -2,9 +2,14 @@ import { computed, signal } from '@preact/signals-core';
 import { done, incoming, working } from '../core/store.ts';
 import type { Task, TaskState } from '../core/task.ts';
 
-export const PANES: TaskState[] = ['incoming', 'working', 'done'];
+/** The two list columns on the board — left and right of the detail panel. */
+export const BOARD_PANES: TaskState[] = ['incoming', 'working'];
 
-export const focusIndex = signal(0);
+/**
+ * Where the cursor lives. `done` is not a board column: focusing it is what
+ * opens the completed flyout, so focus and "is the flyout open" are one fact.
+ */
+export const focusedPane = signal<TaskState>('incoming');
 export const cursors = signal<Record<TaskState, number>>({ incoming: 0, working: 0, done: 0 });
 /** Multi-selection, for tools that accept more than one task. */
 export const selection = signal<string[]>([]);
@@ -19,7 +24,15 @@ export interface MenuItem {
 
 export type Overlay =
   | { kind: 'help' }
-  | { kind: 'viewer'; taskId: string; scroll: number }
+  | {
+      kind: 'viewer';
+      taskId: string;
+      scroll: number;
+      /** Which step of the chain the cursor sits on. */
+      pick: number;
+      /** Step ids ticked for copying, in the order they were ticked. */
+      picked: string[];
+    }
   | { kind: 'menu'; title: string; subtitle?: string; items: MenuItem[]; index: number }
   | {
       kind: 'prompt';
@@ -30,11 +43,12 @@ export type Overlay =
       onSubmit: (value: string) => void;
     };
 
+export type ViewerOverlay = Extract<Overlay, { kind: 'viewer' }>;
+
 export const overlay = signal<Overlay | null>(null);
 
-export const focusedPane = computed<TaskState>(
-  () => PANES[focusIndex.value] ?? 'incoming',
-);
+/** True while the completed flyout is up. */
+export const doneOpen = computed(() => focusedPane.value === 'done');
 
 export function listOf(pane: TaskState): Task[] {
   if (pane === 'incoming') return incoming.value;
@@ -67,15 +81,34 @@ export function moveCursor(delta: number): void {
   setCursor(pane, next);
 }
 
-export function focusPane(index: number): void {
-  focusIndex.value = Math.min(PANES.length - 1, Math.max(0, index));
+/** The column focus falls back to when the flyout closes. */
+let lastBoardPane: TaskState = 'incoming';
+
+export function focusPane(pane: TaskState): void {
+  if (pane !== 'done') lastBoardPane = pane;
+  focusedPane.value = pane;
 }
 
+/** The completed flyout is a focus state, so opening it is just focusing it. */
+export function toggleDone(): void {
+  focusPane(focusedPane.value === 'done' ? lastBoardPane : 'done');
+}
+
+/** Cycles the board columns only — never lands on the flyout. */
 export function cyclePane(delta: number): void {
-  focusIndex.value = (focusIndex.value + delta + PANES.length) % PANES.length;
+  const index = Math.max(0, BOARD_PANES.indexOf(lastBoardPane));
+  const next = (index + delta + BOARD_PANES.length) % BOARD_PANES.length;
+  focusPane(BOARD_PANES[next] ?? 'incoming');
 }
 
 export const selectedSet = computed(() => new Set(selection.value));
+
+/** The ticked tasks, board order, dropping ids that have since gone away. */
+export const selectedTasks = computed<Task[]>(() => {
+  if (selection.value.length === 0) return [];
+  const all = [...incoming.value, ...working.value, ...done.value];
+  return all.filter((task) => selectedSet.value.has(task.id));
+});
 
 export function toggleSelected(id: string): void {
   selection.value = selection.value.includes(id)

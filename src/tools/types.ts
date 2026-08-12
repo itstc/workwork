@@ -49,7 +49,11 @@ export interface Tool {
   /**
    * Adjust the task(s) and input before the process starts — templating a
    * prompt, filtering tasks the tool can't handle, defaulting the input.
-   * Must preserve task ids so results can be chained back to their parents.
+   *
+   * Tasks come back by id, so anything returned must exist in the store: either
+   * the tasks handed in, or a new link a tool opened on top of one (claude
+   * turns the message you typed into a task and works on that). Whatever is
+   * returned is what enters the working pool and what `post` chains onto.
    */
   pre(invocation: ToolInvocation): Promise<ToolInvocation> | ToolInvocation;
 

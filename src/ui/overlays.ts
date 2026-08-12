@@ -4,7 +4,7 @@ import { getTask } from '../core/store.ts';
 import type { Task } from '../core/task.ts';
 import { chainOf, taskTitle } from '../core/task.ts';
 import { fit, truncate, width, wrap } from './ansi.ts';
-import type { Overlay } from './state.ts';
+import type { Overlay, ViewerOverlay } from './state.ts';
 import { ago, box, duration, stateColor, t } from './theme.ts';
 
 /** Bottom-anchored panels replace whole rows, so nothing needs compositing. */
@@ -84,35 +84,59 @@ function renderPrompt(
   return panelBox(overlay.title, body, cols);
 }
 
+/** Where a chain step starts and ends in the rendered content, for scrolling. */
+export interface StepAnchor {
+  id: string;
+  start: number;
+  /** Exclusive. */
+  end: number;
+}
+
+export interface ViewerRender {
+  lines: string[];
+  total: number;
+  steps: StepAnchor[];
+}
+
 /**
  * The task viewer: the whole chain, root to tail, so you can see a slack
  * message become a claude run become a terminal hand-off become a test run.
+ * Steps carry a cursor and tick marks — see `copyViewerSteps` in app.ts.
  */
-export function renderViewer(
-  overlay: Extract<Overlay, { kind: 'viewer' }>,
-  cols: number,
-  rows: number,
-): { lines: string[]; total: number } {
+export function renderViewer(overlay: ViewerOverlay, cols: number, rows: number): ViewerRender {
   const task = getTask(overlay.taskId);
-  if (!task) return { lines: [t.error(' task no longer exists')], total: 1 };
+  if (!task) return { lines: [t.error(' task no longer exists')], total: 1, steps: [] };
 
   const chain = chainOf(task, getTask);
   const inner = Math.max(20, cols - 4);
+  const picked = new Set(overlay.picked);
+  const pick = Math.min(Math.max(0, overlay.pick), Math.max(0, chain.length - 1));
   const content: string[] = [];
+  const steps: StepAnchor[] = [];
+
+  const heading = [
+    `${chain.length} step${chain.length === 1 ? '' : 's'}`,
+    `chain ${short(chain[0]?.id ?? '')} → ${short(task.id)}`,
+    picked.size ? `${picked.size} selected` : '',
+  ].filter(Boolean);
 
   content.push('');
   content.push(` ${t.title(truncate(taskTitle(chain[chain.length - 1] ?? task), inner))}`);
-  content.push(
-    ` ${t.dim(`${chain.length} step${chain.length === 1 ? '' : 's'} · chain ${short(chain[0]?.id ?? '')} → ${short(task.id)}`)}`,
-  );
+  content.push(` ${t.dim(heading.join(' · '))}`);
   content.push('');
 
   chain.forEach((node, index) => {
+    const isCursor = index === pick;
+    const isPicked = picked.has(node.id);
     const isCurrent = node.id === task.id;
     const isTail = index === chain.length - 1;
     const color = stateColor[node.state];
-    const bullet = isCurrent ? color('●') : t.dim('○');
+    // Arrow column is the cursor, bullet column doubles as the tick box.
+    const bullet = isPicked ? color('✓') : isCurrent ? color('●') : t.dim('○');
     const stem = isTail ? ' ' : t.dim(box.v);
+    // Two extra columns of gutter hold the cursor/tick marker.
+    const lead = `  ${stem}`;
+    const start = content.length;
 
     const meta = [
       t.accent(node.source),
@@ -125,37 +149,41 @@ export function renderViewer(
       .filter(Boolean)
       .join(t.dim(' · '));
 
-    content.push(` ${bullet} ${meta}`);
-    content.push(` ${stem} ${t.dim(`id ${short(node.id)}${node.prev ? ` ← ${short(node.prev)}` : ''}`)}`);
+    const marker = isCursor ? t.accent('▸') : ' ';
+    const head = ` ${marker} ${bullet} ${meta}`;
+    content.push(isCursor ? t.cursor(fit(head, Math.max(1, cols - 1))) : head);
+    content.push(`${lead} ${t.dim(`id ${short(node.id)}${node.prev ? ` ← ${short(node.prev)}` : ''}`)}`);
 
+    const paint = isCursor || isPicked || isCurrent ? t.text : t.muted;
     for (const line of wrap(node.data, inner - 4)) {
-      content.push(` ${stem}   ${isCurrent ? t.text(line) : t.muted(line)}`);
+      content.push(`${lead}   ${paint(line)}`);
     }
 
     const extras = extraMeta(node);
     if (extras.length) {
-      content.push(` ${stem}`);
-      for (const line of extras) content.push(` ${stem}   ${t.dim(line)}`);
+      content.push(lead);
+      for (const line of extras) content.push(`${lead}   ${t.dim(line)}`);
     }
 
     const run = runForTask(node.id);
     if (run) {
-      content.push(` ${stem}`);
-      content.push(` ${stem}   ${t.warn(`▸ ${run.toolName} running — live output`)}`);
+      content.push(lead);
+      content.push(`${lead}   ${t.warn(`▸ ${run.toolName} running — live output`)}`);
       for (const line of wrap(run.log.slice(-4000), inner - 4).slice(-40)) {
-        content.push(` ${stem}   ${t.dim(line)}`);
+        content.push(`${lead}   ${t.dim(line)}`);
       }
     }
 
-    if (!isTail) content.push(` ${t.dim(box.v)}`);
+    steps.push({ id: node.id, start, end: content.length });
+    if (!isTail) content.push(`  ${t.dim(box.v)}`);
   });
 
   content.push('');
 
   const viewport = Math.max(1, rows);
   const maxScroll = Math.max(0, content.length - viewport);
-  const scroll = Math.min(overlay.scroll, maxScroll);
-  return { lines: content.slice(scroll, scroll + viewport), total: content.length };
+  const scroll = Math.min(Math.max(0, overlay.scroll), maxScroll);
+  return { lines: content.slice(scroll, scroll + viewport), total: content.length, steps };
 }
 
 function extraMeta(task: Task): string[] {
@@ -175,8 +203,9 @@ export function renderHelp(cols: number, rows: number): string[] {
       'move',
       [
         ['↑ ↓ / j k', 'move within a pane'],
-        ['← → / h l / tab', 'switch pane'],
-        ['1 2 3', 'jump to incoming / working / done'],
+        ['← → / h l / tab', 'switch pane — incoming ⇄ working'],
+        ['1 2', 'jump to incoming / working'],
+        ['3', 'open the completed flyout (esc closes it)'],
         ['g G', 'top / bottom'],
       ],
     ],
@@ -193,10 +222,21 @@ export function renderHelp(cols: number, rows: number): string[] {
       ],
     ],
     [
+      'viewer',
+      [
+        ['↑ ↓ / j k', 'move between steps of the chain'],
+        ['space', 'tick a step'],
+        ['⏎', 'copy ticked steps (or the one under the cursor) to the clipboard'],
+        ['pgup pgdn', 'scroll a long step'],
+        ['a', 'tick every step'],
+        ['esc', 'clear ticks / close'],
+      ],
+    ],
+    [
       'work',
       [
         ['r', 'run a tool on the task(s)'],
-        ['c', 'claude — pipe the task into claude -p'],
+        ['c', 'claude — type a message; the reply comes back to the feed'],
         ['g (in tools)', 'ghostty — open a tab to work by hand'],
         ['i (in tools)', 'git — run a git command against the task'],
         ['f', 'feeds — start/stop data sources'],

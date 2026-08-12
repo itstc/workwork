@@ -13,7 +13,13 @@ export interface ExecOptions {
 
 export interface ExecResult {
   ok: boolean;
+  /** stdout and stderr interleaved, the way a terminal would show it. */
   output: string;
+  /**
+   * stdout on its own. What a tool should treat as the answer — a process that
+   * chats on stderr would otherwise put its warnings in the resulting task.
+   */
+  stdout: string;
   exitCode: number | null;
   signal: NodeJS.Signals | null;
   durationMs: number;
@@ -31,13 +37,14 @@ export function exec(command: string, args: string[], options: ExecOptions = {})
   return new Promise<ExecResult>((resolve) => {
     let settled = false;
     let output = '';
+    let stdout = '';
     let aborted = false;
 
-    const finish = (result: Omit<ExecResult, 'durationMs' | 'output' | 'aborted'>) => {
+    const finish = (result: Omit<ExecResult, 'durationMs' | 'output' | 'stdout' | 'aborted'>) => {
       if (settled) return;
       settled = true;
       cleanup();
-      resolve({ ...result, output, aborted, durationMs: Date.now() - started });
+      resolve({ ...result, output, stdout, aborted, durationMs: Date.now() - started });
     };
 
     let child: ReturnType<typeof spawn>;
@@ -51,6 +58,7 @@ export function exec(command: string, args: string[], options: ExecOptions = {})
       resolve({
         ok: false,
         output: `failed to spawn ${command}: ${String(error)}`,
+        stdout: '',
         exitCode: null,
         signal: null,
         aborted: false,
@@ -59,13 +67,14 @@ export function exec(command: string, args: string[], options: ExecOptions = {})
       return;
     }
 
-    const collect = (chunk: Buffer) => {
+    const collect = (chunk: Buffer, isStdout: boolean) => {
       const text = chunk.toString('utf8');
       output += text;
+      if (isStdout) stdout += text;
       options.onOutput?.(text);
     };
-    child.stdout?.on('data', collect);
-    child.stderr?.on('data', collect);
+    child.stdout?.on('data', (chunk: Buffer) => collect(chunk, true));
+    child.stderr?.on('data', (chunk: Buffer) => collect(chunk, false));
 
     const kill = (reason: 'abort' | 'timeout') => {
       aborted = true;
