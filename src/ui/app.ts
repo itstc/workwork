@@ -1,7 +1,7 @@
 import { copyToClipboard } from '../core/clipboard.ts';
 import { clearNotices, notify } from '../core/notify.ts';
 import { cancelRun, runForTask, runTool } from '../core/runner.ts';
-import { discardChain, done, getTask, setState } from '../core/store.ts';
+import { discardChain, done, getTask, setState, splitChain } from '../core/store.ts';
 import { chainOf, taskTitle } from '../core/task.ts';
 import type { Task } from '../core/task.ts';
 import { feedStates, feeds, submit, toggleFeed } from '../feeds/index.ts';
@@ -69,6 +69,7 @@ export function render(): string[] {
       ['↑↓', 'step'],
       ['space', ticked ? `ticked ${ticked}` : 'tick'],
       ['⏎', ticked ? `copy ${ticked}` : 'copy step'],
+      ['v', 'split here'],
       ['esc', 'close'],
       ['', t.dim(position)],
     ]);
@@ -334,6 +335,51 @@ function copyViewerSteps(current: ViewerOverlay): void {
     const what = steps.length === 1 ? taskTitle(steps[0]!) : `${steps.length} steps`;
     notify('success', `copied ${what} (${text.length} chars)`);
   });
+}
+
+/**
+ * Cut the chain at the viewer cursor. Everything before the cursor stays with
+ * the task you were reading up to that point; the cursor step onward becomes a
+ * task of its own, so a chain that turned into two pieces of work can be split
+ * without losing either half's history.
+ */
+function splitViewerChain(current: ViewerOverlay): void {
+  const task = getTask(current.taskId);
+  if (!task) {
+    notify('error', 'nothing to split — that task is gone');
+    return;
+  }
+
+  const chain = chainOf(task, getTask);
+  const at = chain[Math.min(Math.max(0, current.pick), chain.length - 1)];
+  if (!at) return;
+  if (!at.prev) {
+    notify('info', 'already the start of the chain — nothing in front to split off');
+    return;
+  }
+
+  const split = splitChain(at.id);
+  if (!split) {
+    notify('error', 'could not split there');
+    return;
+  }
+
+  // Keep reading whichever half the viewed task landed in, cursor parked on the
+  // cut: the new root if we followed it, otherwise the head half's fresh tail.
+  const stillThere = getTask(current.taskId) ?? split.tail;
+  const nextChain = chainOf(stillThere, getTask);
+  const cut = nextChain.findIndex((node) => node.id === at.id);
+  const pick = cut >= 0 ? cut : Math.max(0, nextChain.length - 1);
+  const ids = new Set(nextChain.map((node) => node.id));
+  const moved: ViewerOverlay = {
+    ...current,
+    taskId: stillThere.id,
+    pick,
+    picked: current.picked.filter((id) => ids.has(id)),
+  };
+  overlay.value = { ...moved, scroll: scrollForStep(moved, pick) };
+
+  notify('success', `split off "${taskTitle(split.tail)}" — ${taskTitle(split.head)} is back in the feed`);
 }
 
 /** Scroll that brings step `index` into view, moving as little as it can. */
@@ -626,6 +672,9 @@ function handleViewer(key: Key, current: ViewerOverlay): void {
       return;
     case 'end':
       to(maxScroll);
+      return;
+    case 'v':
+      splitViewerChain({ ...current, pick });
       return;
     case 'r': {
       // Run a tool straight from the viewer, on the task being read — not on

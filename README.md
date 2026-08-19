@@ -78,6 +78,7 @@ notification (plus a bell) when they finish.
 | `space` | add to a multi-selection |
 | `r` | run a tool on the task(s); `c` is a shortcut for claude |
 | `⏎` (in the viewer) | copy the ticked steps — or the one under the cursor — to the clipboard |
+| `v` (in the viewer) | split the chain at the cursor — that step onward becomes a new task |
 | `d` / `u` | mark complete / send back to the feed |
 | `x` | cancel a running tool, or delete a task and its history |
 | `f` | data sources — start/stop connections |
@@ -89,7 +90,9 @@ claude, handed to a herdr tab, then had `git` run against it shows up as four
 linked steps with every process transcript intact. Inside it, `↑ ↓` moves
 between steps, `space` ticks the ones you want (`a` ticks all), and `⏎` pipes
 their text through `pbcopy` — with nothing ticked it copies the step under the
-cursor.
+cursor. `v` splits the chain at the cursor: the steps in front of it stay
+together as a task that goes back to the incoming feed, and the cursor step
+onward is detached into a task of its own — both halves keep their history.
 
 ## The task model
 

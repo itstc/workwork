@@ -75,6 +75,29 @@ export function appendResult(parent: Task, draft: TaskDraft): Task {
   return child;
 }
 
+/**
+ * Cut a chain in two at `id`. Everything in front of `id` keeps its history and
+ * its new tail goes live again in `headState`; `id` and everything after it are
+ * detached into a chain of their own, still live wherever they already were.
+ *
+ * Splitting at a root does nothing — there is nothing in front of it to keep.
+ */
+export function splitChain(
+  id: string,
+  headState: TaskState = 'incoming',
+): { head: Task; tail: Task } | undefined {
+  const at = getTask(id);
+  const before = getTask(at?.prev);
+  if (!at || !before) return undefined;
+
+  const head: Task = { ...before, next: null, state: headState };
+  const tail: Task = { ...at, prev: null, meta: { ...at.meta, split_from: before.id } };
+  batch(() => {
+    put(head, tail);
+  });
+  return { head, tail };
+}
+
 /** Drop a whole chain — the task plus everything behind it. */
 export function discardChain(id: string): void {
   const start = getTask(id);

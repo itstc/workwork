@@ -229,6 +229,7 @@ export function renderHelp(cols: number, rows: number): string[] {
         ['⏎', 'copy ticked steps (or the one under the cursor) to the clipboard'],
         ['pgup pgdn', 'scroll a long step'],
         ['a', 'tick every step'],
+        ['v', 'split here — this step onward becomes a new task'],
         ['esc', 'clear ticks / close'],
       ],
     ],
