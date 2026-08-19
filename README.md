@@ -85,7 +85,7 @@ notification (plus a bell) when they finish.
 | `q` | quit (state is saved) |
 
 The viewer is where a task's life is legible: a slack message that got piped to
-claude, handed to a Ghostty tab, then had `git` run against it shows up as four
+claude, handed to a herdr tab, then had `git` run against it shows up as four
 linked steps with every process transcript intact. Inside it, `↑ ↓` moves
 between steps, `space` ticks the ones you want (`a` ticks all), and `⏎` pipes
 their text through `pbcopy` — with nothing ticked it copies the step under the
@@ -197,7 +197,7 @@ Register it in `src/tools/index.ts`. Shipped tools:
 | tool | what it does |
 | --- | --- |
 | **claude** | a conversation: the message you type becomes a task in the working pool, claude's reply comes back to the feed, and replying again resumes the same claude session |
-| **ghostty tab** | opens a Ghostty tab `cd`'d into the right directory with the task text printed, to work by hand |
+| **herdr tab** | runs `herdr tab create --label <name>` to open a tab for the task, to work by hand |
 | **git** | runs a git command and staples the output onto the task(s); works on a multi-selection |
 
 ### Talking to claude
@@ -216,10 +216,8 @@ as context. If a session has gone missing — pruned history, a different workin
 directory — the run falls back to a fresh session carrying the whole chain
 rather than stranding the conversation, and notes `resumed_from` on the result.
 
-The Ghostty hand-off tries a real new tab via AppleScript first (needs
-Accessibility permission for your terminal), falls back to a new window via
-`open -na Ghostty`, then to `ghostty -e`. `WORKWORK_TERMINAL_CMD` overrides the
-lot — it's invoked with the generated launcher script as its argument.
+The herdr hand-off is a single `herdr tab create --label <name>`. The name is
+whatever you type at the prompt; leave it blank and the task's title is used.
 
 ## Configuration
 
@@ -231,7 +229,7 @@ lot — it's invoked with the generated launcher script as its argument.
 | `WORKWORK_CLAUDE_TIMEOUT_MS` | default 10 minutes |
 | `WORKWORK_COPY_BIN` / `WORKWORK_COPY_ARGS` | clipboard command for the viewer (default `pbcopy`) |
 | `WORKWORK_GIT_CWD` | repo the git tool runs in (default: cwd) |
-| `WORKWORK_GHOSTTY_BIN` / `WORKWORK_TERMINAL_CMD` | terminal hand-off |
+| `WORKWORK_HERDR_BIN` | herdr executable (default `herdr`) |
 | `WORKWORK_DESKTOP_NOTIFY` | `1` to also raise macOS notifications on completion |
 
 ## Layout
@@ -285,10 +283,7 @@ Two things to know:
   and because it exercises the feed interface against a real connection — with
   reconnect and backoff — in a way the manual feed cannot. Delete
   `src/feeds/websocket.ts` and its entry in `src/feeds/index.ts` to drop it.
-- **The Ghostty new-*tab* path is the one thing not executed during testing**, as
-  it would have opened terminal windows. Its `pre`/`post` contract is verified;
-  the spawn itself is not. It uses AppleScript keystrokes (there is no cleaner
-  API for "tab in the existing window"), so it needs Accessibility permission for
-  whichever terminal runs workwork, and falls back to a new window via
-  `open -na Ghostty`, then `ghostty -e`. `WORKWORK_TERMINAL_CMD` overrides all
-  of it. Worth one manual try before relying on it.
+- **The herdr tab path is the one thing not executed during testing**, as it
+  would have opened terminal tabs. Its `pre`/`post` contract is verified; the
+  `herdr tab create` call itself is not. Worth one manual try before relying
+  on it.

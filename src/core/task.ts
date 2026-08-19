@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
  * the old task's `next` is stamped with the new id. Walking `prev`/`next` gives
  * you the full history of a piece of work:
  *
- *   slack -> claude -> ghostty tab -> git test run -> done
+ *   slack -> claude -> herdr tab -> git test run -> done
  *
  * Only the tail of a chain (`next === null`) is "live" and shown in a pane.
  * Everything behind it is history.

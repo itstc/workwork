@@ -26,7 +26,7 @@ export const gitTool: Tool = {
   },
 
   async run({ tasks, input }, ctx) {
-    // A task can carry its own repo (set by the ghostty hand-off, for example).
+    // A task can carry its own repo — a feed, or an earlier git run in the chain.
     const cwd =
       (typeof tasks[0]?.meta.cwd === 'string' ? (tasks[0].meta.cwd as string) : undefined) ??
       process.env.WORKWORK_GIT_CWD ??

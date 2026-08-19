@@ -24,8 +24,7 @@ Environment
   WORKWORK_CLAUDE_BIN      claude executable (default: claude)
   WORKWORK_CLAUDE_ARGS     extra args for claude -p
   WORKWORK_GIT_CWD         repo the git tool runs in (default: cwd)
-  WORKWORK_GHOSTTY_BIN     ghostty executable
-  WORKWORK_TERMINAL_CMD    override the terminal used for hand-offs
+  WORKWORK_HERDR_BIN       herdr executable (default: herdr)
   WORKWORK_DESKTOP_NOTIFY  1 to also raise macOS notifications
 `;
 

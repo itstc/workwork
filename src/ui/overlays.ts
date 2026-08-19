@@ -237,7 +237,7 @@ export function renderHelp(cols: number, rows: number): string[] {
       [
         ['r', 'run a tool on the task(s)'],
         ['c', 'claude — type a message; the reply comes back to the feed'],
-        ['g (in tools)', 'ghostty — open a tab to work by hand'],
+        ['g (in tools)', 'herdr — create a tab to work by hand'],
         ['i (in tools)', 'git — run a git command against the task'],
         ['f', 'feeds — start/stop data sources'],
       ],
