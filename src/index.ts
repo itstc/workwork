@@ -23,9 +23,12 @@ Environment
   WORKWORK_WS_URL          websocket feed source; enables that feed
   WORKWORK_CLAUDE_BIN      claude executable (default: claude)
   WORKWORK_CLAUDE_ARGS     extra args for claude -p
-  WORKWORK_GIT_CWD         repo the git tool runs in (default: cwd)
+  WORKWORK_BASH_CWD        directory the bash tool runs in (default: cwd)
+  WORKWORK_BASH_SHELL      shell the bash tool runs commands with (default: $SHELL)
   WORKWORK_HERDR_BIN       herdr executable (default: herdr)
+  WORKWORK_HERDR_AGENT_KIND  agent kind for herdr agent start (default: claude)
   WORKWORK_DESKTOP_NOTIFY  1 to also raise macOS notifications
+  WORKWORK_CLEANUP_TIMEOUT_MS  per-tool cleanup budget on completion (default 30s)
 `;
 
 async function main(): Promise<void> {

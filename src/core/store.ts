@@ -1,5 +1,5 @@
 import { batch, computed, signal } from '@preact/signals-core';
-import type { Task, TaskDraft, TaskState } from './task.ts';
+import type { Task, TaskDraft, TaskMeta, TaskState } from './task.ts';
 import { createTask, deriveTask, seqOf } from './task.ts';
 
 /**
@@ -58,6 +58,19 @@ export function setState(id: string, state: TaskState): Task | undefined {
   const task = getTask(id);
   if (!task || task.state === state) return task;
   const updated = { ...task, state };
+  put(updated);
+  return updated;
+}
+
+/**
+ * Write bookkeeping onto a live task's meta without touching the chain — a
+ * cleanup stamp, say. Everything that is *work* appends a task instead; this is
+ * for notes about a task that are not themselves a step.
+ */
+export function stampMeta(id: string, patch: TaskMeta): Task | undefined {
+  const task = getTask(id);
+  if (!task) return undefined;
+  const updated = { ...task, meta: { ...task.meta, ...patch } };
   put(updated);
   return updated;
 }

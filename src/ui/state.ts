@@ -11,11 +11,10 @@ export const BOARD_PANES: TaskState[] = ['incoming', 'working'];
  */
 export const focusedPane = signal<TaskState>('incoming');
 export const cursors = signal<Record<TaskState, number>>({ incoming: 0, working: 0, done: 0 });
-/** Multi-selection, for tools that accept more than one task. */
-export const selection = signal<string[]>([]);
 
 export interface MenuItem {
-  key: string;
+  /** Shortcut that picks the item outright. Omitted on menus that search. */
+  key?: string;
   label: string;
   description: string;
   hint?: string;
@@ -30,10 +29,19 @@ export type Overlay =
       scroll: number;
       /** Which step of the chain the cursor sits on. */
       pick: number;
-      /** Step ids ticked for copying, in the order they were ticked. */
-      picked: string[];
     }
-  | { kind: 'menu'; title: string; subtitle?: string; items: MenuItem[]; index: number }
+  | {
+      kind: 'menu';
+      title: string;
+      subtitle?: string;
+      items: MenuItem[];
+      index: number;
+      /**
+       * Present — even empty — on a menu you search rather than one you pick by
+       * key: what you type narrows the list instead of matching a shortcut.
+       */
+      filter?: string;
+    }
   | {
       kind: 'prompt';
       title: string;
@@ -44,6 +52,18 @@ export type Overlay =
     };
 
 export type ViewerOverlay = Extract<Overlay, { kind: 'viewer' }>;
+export type MenuOverlay = Extract<Overlay, { kind: 'menu' }>;
+
+/**
+ * The items a menu is currently showing: everything, or what the filter keeps.
+ * Labels only — descriptions are prose, and matching them turns a filter into a
+ * guessing game ("her" lives inside "there").
+ */
+export function menuItems(menu: MenuOverlay): MenuItem[] {
+  const query = menu.filter?.trim().toLowerCase();
+  if (!query) return menu.items;
+  return menu.items.filter((item) => item.label.toLowerCase().includes(query));
+}
 
 export const overlay = signal<Overlay | null>(null);
 
@@ -101,33 +121,12 @@ export function cyclePane(delta: number): void {
   focusPane(BOARD_PANES[next] ?? 'incoming');
 }
 
-export const selectedSet = computed(() => new Set(selection.value));
-
-/** The ticked tasks, board order, dropping ids that have since gone away. */
-export const selectedTasks = computed<Task[]>(() => {
-  if (selection.value.length === 0) return [];
-  const all = [...incoming.value, ...working.value, ...done.value];
-  return all.filter((task) => selectedSet.value.has(task.id));
-});
-
-export function toggleSelected(id: string): void {
-  selection.value = selection.value.includes(id)
-    ? selection.value.filter((existing) => existing !== id)
-    : [...selection.value, id];
-}
-
-export function clearSelection(): void {
-  if (selection.value.length) selection.value = [];
-}
-
 /**
- * What a tool should act on: the multi-selection if there is one, otherwise the
- * task under the cursor. Selected ids that no longer exist are dropped.
+ * What a tool should act on: the task under the cursor. Handed back as a list
+ * because a tool run takes a list of tasks, even when the board only ever
+ * points at one of them.
  */
 export function targetTasks(): Task[] {
-  const all = [...incoming.value, ...working.value, ...done.value];
-  const chosen = all.filter((task) => selection.value.includes(task.id));
-  if (chosen.length) return chosen;
   const current = cursorTask.value;
   return current ? [current] : [];
 }

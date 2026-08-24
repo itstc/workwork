@@ -3,10 +3,12 @@
 A CLI work queue. Connections turn into tasks, tasks get piped through tools, and
 whatever the tool produces comes back to the feed as the next link in the chain.
 
-```
-  slack websocket ──▶ INCOMING FEED ──▶ WORKING POOL ──▶ result back to INCOMING
-                            ▲                                      │
-                            └──────── continue, or mark complete ◀─┘
+```mermaid
+flowchart LR
+    conn["slack websocket"] --> feed["INCOMING FEED"]
+    feed -- "run a tool" --> pool["WORKING POOL"]
+    pool -- "the result is the next link" --> feed
+    feed -- "or mark complete" --> done["COMPLETED"]
 ```
 
 Built on [chalk](https://github.com/chalk/chalk) for the interface and
@@ -76,7 +78,7 @@ notification (plus a bell) when they finish.
 | `n` | new task via the manual feed |
 | `⏎` | open the viewer — the task's whole history |
 | `space` | add to a multi-selection |
-| `r` | run a tool on the task(s); `c` is a shortcut for claude |
+| `r` | run a tool on the task(s) — type to filter the list; `c` is a shortcut for claude |
 | `⏎` (in the viewer) | copy the ticked steps — or the one under the cursor — to the clipboard |
 | `v` (in the viewer) | split the chain at the cursor — that step onward becomes a new task |
 | `d` / `u` | mark complete / send back to the feed |
@@ -86,7 +88,7 @@ notification (plus a bell) when they finish.
 | `q` | quit (state is saved) |
 
 The viewer is where a task's life is legible: a slack message that got piped to
-claude, handed to a herdr tab, then had `git` run against it shows up as four
+claude, handed to a herdr tab, then had a `bash` command run against it shows up as four
 linked steps with every process transcript intact. Inside it, `↑ ↓` moves
 between steps, `space` ticks the ones you want (`a` ticks all), and `⏎` pipes
 their text through `pbcopy` — with nothing ticked it copies the step under the
@@ -163,7 +165,8 @@ shape the Slack example takes — it reconnects with backoff and reads common
 
 ## Adding a tool
 
-A tool takes task(s) and optional input, and is built from three functions:
+A tool takes task(s) and optional input, and is built from three functions, plus
+an optional fourth:
 
 - **`pre`** — adjust the tasks and input before anything runs (template a prompt,
   drop tasks it can't handle, default the input). Task ids must survive so
@@ -173,10 +176,15 @@ A tool takes task(s) and optional input, and is built from three functions:
 - **`post`** — turn the process output into task(s), each linked to the `parent`
   it came from. Returning a result closes that parent out and puts the child back
   in the incoming feed.
+- **`cleanup`** — optional. Release whatever `run` left standing once the work is
+  finished: `d` on a task walks its whole chain and calls this on the tool behind
+  each step, handing back the task *that tool produced* so the meta `post`
+  stamped (a tab id, an agent name) says what to let go of. Tools that leave
+  nothing behind (claude, bash) leave it off. See [Completing a task](#completing-a-task).
 
 ```ts
 export const testTool: Tool = {
-  id: 'test', name: 'tests', description: 'Run the suite', key: 't',
+  id: 'test', name: 'tests', description: 'Run the suite',
   accepts: 'many',
   input: { prompt: 'test filter', placeholder: '' },
 
@@ -190,18 +198,28 @@ export const testTool: Tool = {
     parent: task.id,
     data: run.output,
     source: 'tool:test',
-    meta: { title: run.ok ? 'tests passed' : 'tests failed', error: !run.ok },
+    meta: { title: run.ok ? 'tests passed' : 'tests failed', error: !run.ok, worktree: run.meta?.worktree },
   })),
+
+  // Optional: undo whatever the run left on the machine, when the work is done.
+  cleanup: (task) => removeWorktree(task.meta.worktree),
 };
 ```
 
-Register it in `src/tools/index.ts`. Shipped tools:
+`input` can also be a function of the task(s) under the cursor, for a tool that
+asks for different things in different states — herdr agent wants a name for a
+new agent and a message for one the task already has.
+
+Register it in `src/tools/index.ts` — that is all a tool needs to be reachable.
+`r` lists every registered tool and typing narrows the list to the names holding
+what you typed, so no tool carries a shortcut of its own. Shipped tools:
 
 | tool | what it does |
 | --- | --- |
 | **claude** | a conversation: the message you type becomes a task in the working pool, claude's reply comes back to the feed, and replying again resumes the same claude session |
-| **herdr tab** | runs `herdr tab create --label <name>` to open a tab for the task, to work by hand |
-| **git** | runs a git command and staples the output onto the task(s); works on a multi-selection |
+| **herdr tab** | runs `herdr tab create --label <name>` to open a tab for the task, to work by hand; completing the task closes that tab again |
+| **herdr agent** | opens the same tab, runs `herdr agent start <name> --kind <kind> --pane <id>` in it, then submits the task with `herdr agent prompt --wait`, handing the work to an agent instead of a person and holding the working pool until that agent finishes its turn or stops to ask; the pane is then read back with `herdr agent read`, so what the agent said is the task that lands in the feed; run it again on the same task and it talks to that agent rather than starting another; completing the task closes the pane the agent is running in, which ends the agent |
+| **bash** | runs a shell command to completion and staples the output onto the task(s); works on a multi-selection |
 
 ### Talking to claude
 
@@ -222,6 +240,156 @@ rather than stranding the conversation, and notes `resumed_from` on the result.
 The herdr hand-off is a single `herdr tab create --label <name>`. The name is
 whatever you type at the prompt; leave it blank and the task's title is used.
 
+`herdr agent` is the same hand-off aimed at an agent. `herdr agent start` never
+makes layout of its own — it wants a pane already sitting at a shell prompt — so
+it is three calls: the tab (created with `--no-focus`, since nobody needs to be
+pulled into it), the agent started in that tab's root pane, read back from the
+create response as `.result.root_pane.pane_id`, and finally `herdr agent prompt
+<name> <task> --wait`, which submits the task's own text so the agent wakes up
+working on the item instead of idling at an empty prompt. The tab keeps the
+label you typed; the agent gets a slug of it, because herdr agent names have
+to match `[a-z][a-z0-9_-]{0,31}` and be unique among the agents currently alive — a
+collision with a live agent picks up a `-2`. The kind is
+`WORKWORK_HERDR_AGENT_KIND` (default `claude`). If the agent fails to come up
+the tab is left alone rather than closed, so the reason is still on screen in
+that pane; the result task carries the agent name and pane id in its meta.
+
+`agent start` wants the pane sitting at an interactive shell prompt, and a tab
+created a moment ago is not there yet — a login shell with a real profile behind
+it spends a beat sourcing it. herdr says `agent_pane_busy` to that, and says it
+immediately: `agent start --timeout` waits for the *agent* to come up, not for
+the shell to arrive. So the start is retried for as long as that is the answer,
+backing off from 250ms to a second, up to `WORKWORK_HERDR_SHELL_READY_MS`
+(default 15s). Only that one error is retried — every other failure is the
+answer and comes straight back — and giving up says how long it waited, so a
+shell that never arrived doesn't read like a hand-off that never waited. An
+agent that comes up but rejects the prompt (herdr refuses submission to a
+blocked agent) is reported as a failure that names the agent, since the pane is
+still there to be driven by hand.
+
+The submission waits, and that is what keeps the task in the working pool: a
+task is `working` for exactly as long as the tool's `run` is pending, so
+returning at submission time put the item back in the feed while the agent was
+still typing. herdr settles the wait on `idle`/`done` — the turn is over — or
+`blocked`, where the agent has stopped at an approval or a question, and both
+are the moment the task is worth looking at again. The state it settled on is
+written to the result's meta as `status`, and a blocked agent says so in the
+result's title rather than looking like an ordinary finish. Cancelling the run
+(`x`) only stops the waiting: the agent is a process in its own pane, and it
+keeps going with the pane still there to be picked up by hand. The wait is
+bounded by `WORKWORK_HERDR_AGENT_WAIT_MS` (default 30 minutes).
+
+Then the pane is read back — `herdr agent read <name> --source recent-unwrapped`
+— and *that* is the body of the task that goes to the feed. herdr has no
+transcript to ask for; the pane is the record. `recent-unwrapped` rather than
+`visible` so an answer that scrolled off the top still comes back, and in its
+own lines instead of hard-wrapped at the pane's width. The input box at the foot
+of the pane — a rule, the line you would type on, another rule, the agent's
+status line — is cut off the bottom, since none of it is anything the agent
+said, and what is left is bounded by `WORKWORK_HERDR_READ_LINES` (default 200).
+
+That bound is counted back from the box rather than forward from the top of the
+read: the answer is what the agent said *last*, and the lines a longer region
+reaches back to are the turn before it, so the snapshot ends on the agent's last
+word. It is applied here rather than by asking herdr for fewer lines, because
+`agent read --lines <n>` is a window on the *viewport* and not on the output —
+it counts back from the bottom row of the pane, and the rows under a young
+agent's last word are blank. A pane 19 rows into a 58-row viewport answers
+`--lines 40` with nothing at all, and `--lines 45` with the last five lines of
+the box. So a
+finished turn, and the question a blocked agent stopped on, are both readable
+off the board without going to the pane at all. A read that fails is not a
+failed run: the turn happened either way, the pane is still there, and the task
+falls back to what was handed over.
+
+It is `agent prompt --wait` rather than a standalone `herdr agent wait`, because
+a separate wait races herdr's detector: the agent is still idle at the instant
+the prompt lands, so a wait that subscribes before the turn is classified as
+`working` matches that idle and returns immediately. `--wait` only matches
+states observed after the submission, and gives up with `agent_prompt_stalled`
+if the prompt produced no state change at all.
+
+That agent name in the meta is what makes the tool repeatable. Running it again
+on a task that has already been handed off walks back up the chain, finds the
+agent, checks with `herdr agent get` that herdr still knows it, and sends
+straight into that pane — one call, no second tab. Re-running is a follow-up,
+not a fork. The input prompt changes with it: with no agent yet it asks for a
+name, and with one it asks for a message, where blank resends the task. So the
+tool is both the hand-off and the conversation after it:
+
+    [task] ──a──▸ tab + agent, task submitted ──a "any luck?"──▸ same pane ──a──▸ …
+
+Only if `agent get` says the name is gone — pane closed, herdr restarted — does
+a fresh tab and agent get started for the task. What gets sent is the task
+itself: since the body is now the agent's reply, each result carries what was
+asked on `meta.prompt`, and that — not the reply — is what a blank re-run hands
+over again, so the item stays the same thing on every re-run rather than reading
+the agent back its own screen. A hand-off that failed records it too, so the
+task in the feed is the herdr error but the *item* is still the work — pressing
+`a` on it again hands the next agent the job rather than the error message.
+(Tasks from a plain `herdr tab` hand-off, which have no prompt recorded, are
+still the task minus the note on the front of it.)
+
+### Completing a task
+
+`d` is the end of the work, not just a move to another pane — so it is also
+where the chain's leftovers go. A completed task is walked back through its
+whole chain, newest step first, and every step is handed to the tool that
+produced it (`meta.via`, the stamp `runTool` writes) for that tool's `cleanup`:
+
+    [slack] ─▸ [claude: …] ─▸ [herdr tab "auth bug"] ─▸ [herdr agent auth-bug] ──d──▸ done
+               session ended     tab closed              agent's pane closed
+
+The tool is asked to release what *it* opened, using what its own `post` wrote
+down. **herdr tab** closes the tab it created (`herdr tab close <id>`).
+**herdr agent** closes the *pane* the agent is running in (`herdr pane close
+<id>`) — herdr has no "stop the agent", so taking the pane out from under it is
+what ends it, and closing the last pane of a tab takes that tab with it, so a
+hand-off still sitting in the tab it opened needs nothing more. A tab the user
+has since split keeps the panes they added. **claude** terminates the session
+the conversation was held in — see below. bash leaves nothing behind, defines no
+`cleanup`, and is skipped.
+
+Which pane gets closed is herdr's answer, not the meta's: the agent is looked up
+with `herdr agent get <name>` first, because an agent can be moved between panes
+and the recorded id would then close the wrong one. Only when the agent is gone
+from herdr entirely — it exited but left its pane sitting there — does the pane
+the hand-off recorded get closed, and then only if `pane get` says it is still
+running the same `terminal_id` the hand-off wrote down. herdr hands pane ids back
+out after a close, and a recycled one is somebody else's work.
+
+A claude turn is a process that exits when it has answered, but the conversation
+it spoke into is a *session* — `--session-id` on the first turn, `--resume` on
+every one after — and that session outlives the process. Completing the chain is
+the point the conversation is over, so anything still attached to the session is
+shut down: a turn that outlived the wait watching it, or an interactive session
+someone resumed the id in to carry on by hand. Which process that is comes from
+`claude agents --json`, not from anything the tool wrote down, because pids get
+reused and a stale one would terminate somebody else's work. It gets `SIGTERM`,
+then `SIGKILL` if it is still there three seconds later. The board's own process
+is never a candidate. A session nobody is holding — the usual case — is the
+outcome cleanup wanted, so it passes quietly; a listing that fails does not mean
+nothing was left behind, so it is reported and the step stays uncleaned. The
+transcript on disk is left alone: the conversation ends, not the record of it.
+
+The walk is forgiving by design, because completing a task must not turn into an
+error report:
+
+- a tab or pane someone already closed by hand comes back `tab_not_found` /
+  `pane_not_found`, which is the outcome that was wanted — it counts as cleaned,
+  as does a pane that turned out to be recycled and was deliberately left alone
+- a step that does fail is reported in a notice and left **unstamped**, so
+  completing the task again retries it; everything else in the chain is still
+  cleaned
+- cleaned steps are stamped `cleaned_at`, so completing → `u` → completing again
+  doesn't shell out twice, and a multi-selection that shares history cleans each
+  step once
+- it runs behind the "completed" notice — closing tabs takes a moment and the
+  board has already moved on — and stays quiet when there was nothing to release
+
+Each cleanup gets `WORKWORK_CLEANUP_TIMEOUT_MS` (default 30s) before its signal
+aborts.
+
 ## Configuration
 
 | variable | |
@@ -231,9 +399,15 @@ whatever you type at the prompt; leave it blank and the task's title is used.
 | `WORKWORK_CLAUDE_BIN` / `WORKWORK_CLAUDE_ARGS` | claude executable and extra `-p` args |
 | `WORKWORK_CLAUDE_TIMEOUT_MS` | default 10 minutes |
 | `WORKWORK_COPY_BIN` / `WORKWORK_COPY_ARGS` | clipboard command for the viewer (default `pbcopy`) |
-| `WORKWORK_GIT_CWD` | repo the git tool runs in (default: cwd) |
+| `WORKWORK_BASH_CWD` | directory the bash tool runs in (default: cwd) |
+| `WORKWORK_BASH_SHELL` / `WORKWORK_BASH_TIMEOUT_MS` | shell the bash tool uses (default `$SHELL`) and how long a command gets (default 10 minutes) |
 | `WORKWORK_HERDR_BIN` | herdr executable (default `herdr`) |
+| `WORKWORK_HERDR_AGENT_KIND` | agent kind the herdr agent tool starts (default `claude`) |
+| `WORKWORK_HERDR_AGENT_WAIT_MS` | how long a hand-off holds the working pool waiting on the agent's turn (default 30 minutes) |
+| `WORKWORK_HERDR_READ_LINES` | how much of the agent's pane is kept when its turn ends, counted back from the foot of the pane (default 200) |
+| `WORKWORK_HERDR_SHELL_READY_MS` | how long `agent start` is retried while a new tab's shell is still coming up (default 15s) |
 | `WORKWORK_DESKTOP_NOTIFY` | `1` to also raise macOS notifications on completion |
+| `WORKWORK_CLEANUP_TIMEOUT_MS` | how long any one tool gets to release what it left behind when a task is completed (default 30s) |
 
 ## Layout
 
@@ -241,7 +415,7 @@ whatever you type at the prompt; leave it blank and the task's title is used.
 src/
   core/     task model, signal store, persistence, process runner, exec helpers
   feeds/    data sources: raw payload -> postprocess -> task
-  tools/    pre -> run -> post, one file per tool
+  tools/    pre -> run -> post (-> cleanup), one file per tool
   ui/       ansi measuring, theme, key parsing, diffing renderer, panes, overlays
 ```
 
@@ -261,6 +435,9 @@ Not by convention — by the shape of the code:
 - **Tools are `pre` → `run` → `post`.** `post` returns results tagged with the
   `parent` they came from; anything a tool declines to produce a result for is
   returned to the incoming feed rather than stranded in the working pool.
+- **Whoever opened something is who closes it.** Completing a task walks the
+  chain and calls each step's own tool `cleanup`, so the board never needs to
+  know what a tool left behind — only which tool left it.
 - **The store is JSON on disk at all times**, so a dead process costs nothing.
 
 ## Status
@@ -275,7 +452,17 @@ Verified end to end, both headlessly and by driving the real binary under a pty:
 - layout geometry at 140/110/84/70/64/50/44 columns, board and flyout alike —
   every row exact width, borders aligned, the grid collapsing feed + detail +
   pool → focused list + detail → one list as the terminal narrows
-- `claude` against a stub binary; `git` against a real repo; `add`/`ls`/`--help`
+- `claude` against a stub binary; `bash` against real commands; `add`/`ls`/`--help`
+- the `agent_pane_busy` retry, against a stub herdr — 12 checks: a pane busy for
+  the first two attempts no longer fails the hand-off, a shell that never
+  arrives still fails and says how long it waited, any other start failure comes
+  straight back without sitting on it, and re-running a failed hand-off sends
+  the work rather than the error it came back with
+- the herdr agent read-back, against a stub herdr — 22 checks: the pane becomes
+  the task on a first hand-off, a blank re-run, a typed follow-up and a turn
+  that settles `blocked`; the request stays what a blank re-run resends rather
+  than the reply; the input box is trimmed off the bottom of a real 199-line
+  pane capture; and a read that fails or comes back empty still lands a task
 
 `tsc --noEmit` is clean.
 
@@ -286,7 +473,17 @@ Two things to know:
   and because it exercises the feed interface against a real connection — with
   reconnect and backoff — in a way the manual feed cannot. Delete
   `src/feeds/websocket.ts` and its entry in `src/feeds/index.ts` to drop it.
-- **The herdr tab path is the one thing not executed during testing**, as it
-  would have opened terminal tabs. Its `pre`/`post` contract is verified; the
-  `herdr tab create` call itself is not. Worth one manual try before relying
-  on it.
+- **The herdr paths are now driven against a real herdr** (0.8.2): `tab create
+  --no-focus` → `agent start --kind claude` → `agent prompt --wait`, the
+  follow-up into a live agent, the fall-through that starts a new agent when
+  `agent get` says the old one is gone, and a turn that settles on `blocked`
+  instead of `done`. The task holds the working pool for the whole turn in each
+  case. `agent read` has been run against a real herdr for its arguments and
+  output shape, but the read-back's own end-to-end pass — a real agent's turn
+  becoming the task — is covered by the stub, not yet by a live agent.
+- **`agent start` used to lose a race with the shell in a tab just created.**
+  One run in three came back `agent_pane_busy` ("not an available shell") — the
+  tab open, no agent in it, and the hand-off failed inside 40ms. It is now
+  retried while that is the answer (see above). Verified against a real herdr
+  with a pane deliberately held busy: six real `agent_pane_busy` answers, then
+  the agent started on the seventh attempt.

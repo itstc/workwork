@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
  * the old task's `next` is stamped with the new id. Walking `prev`/`next` gives
  * you the full history of a piece of work:
  *
- *   slack -> claude -> herdr tab -> git test run -> done
+ *   slack -> claude -> herdr tab -> bash test run -> done
  *
  * Only the tail of a chain (`next === null`) is "live" and shown in a pane.
  * Everything behind it is history.
@@ -40,6 +40,8 @@ export interface TaskMeta {
   duration_ms?: number;
   /** Set when a task was recovered from disk after the process died mid-work. */
   recovered_at?: string;
+  /** Set once the producing tool's `cleanup` has released what it left behind. */
+  cleaned_at?: string;
   [key: string]: unknown;
 }
 
@@ -122,4 +124,21 @@ export function chainOf(task: Task, byId: (id: string) => Task | undefined): Tas
   }
 
   return [...back, task, ...forward];
+}
+
+/**
+ * The head of the chain `task` belongs to — the task the work came in as,
+ * before any tool appended to it. A completed chain is read by where it
+ * started, not by the step that happened to close it.
+ */
+export function rootOf(task: Task, byId: (id: string) => Task | undefined): Task {
+  const seen = new Set<string>([task.id]);
+  let root = task;
+  let cursor = task.prev ? byId(task.prev) : undefined;
+  while (cursor && !seen.has(cursor.id)) {
+    seen.add(cursor.id);
+    root = cursor;
+    cursor = cursor.prev ? byId(cursor.prev) : undefined;
+  }
+  return root;
 }

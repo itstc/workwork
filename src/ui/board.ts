@@ -2,7 +2,7 @@ import { notices } from '../core/notify.ts';
 import { runForTask, runs } from '../core/runner.ts';
 import { done, getTask, incoming, working } from '../core/store.ts';
 import type { Task, TaskState } from '../core/task.ts';
-import { chainOf, taskTitle } from '../core/task.ts';
+import { chainOf, rootOf, taskTitle } from '../core/task.ts';
 import { feedStates, feeds } from '../feeds/index.ts';
 import { fit, padStart, truncate, width, wrap } from './ansi.ts';
 import {
@@ -11,13 +11,13 @@ import {
   cursorTask,
   doneOpen,
   focusedPane,
-  selectedSet,
-  selectedTasks,
 } from './state.ts';
 import { ago, box, duration, spinner, stateColor, stateLabel, stateShort, t } from './theme.ts';
 
 const MIN_LIST = 18;
 const MIN_DETAIL = 28;
+/** Under this the detail box is all border and no content, so it is dropped. */
+const MIN_DETAIL_ROWS = 8;
 const ROW_HEIGHT = 2;
 const DETAIL_LABEL = 'TASK DETAIL';
 
@@ -30,17 +30,20 @@ type Column =
 
 /**
  * The board is a 1 : 3 : 1 grid — incoming feed, the detail of whatever is
- * under the cursor, working pool. Narrow terminals drop the far column, then
- * the detail, rather than squeezing all three into unreadable strips.
+ * under the cursor, working pool. Small terminals drop the far column, then
+ * the detail, rather than squeezing all three into unreadable strips. A short
+ * window drops the detail too: a couple of body rows under a header is not
+ * worth the width, and the queues are what you steer by.
  */
-export function boardColumns(cols: number): Column[] {
+export function boardColumns(cols: number, rows: number): Column[] {
   const focus = focusedPane.value;
   // The flyout is not a column; while it is up the board keeps its last shape.
   const single: TaskState = focus === 'done' ? 'incoming' : focus;
+  const roomForDetail = rows >= MIN_DETAIL_ROWS;
 
   const three = cols - 2;
   const lists = Math.max(Math.floor(three / 5), MIN_LIST);
-  if (three - lists * 2 >= MIN_DETAIL) {
+  if (roomForDetail && three - lists * 2 >= MIN_DETAIL) {
     return [
       { kind: 'list', pane: 'incoming', width: lists },
       { kind: 'detail', width: three - lists * 2 },
@@ -50,10 +53,20 @@ export function boardColumns(cols: number): Column[] {
 
   const two = cols - 1;
   const list = Math.max(Math.floor(two / 4), MIN_LIST);
-  if (two - list >= MIN_DETAIL) {
+  if (roomForDetail && two - list >= MIN_DETAIL) {
     return [
       { kind: 'list', pane: single, width: list },
       { kind: 'detail', width: two - list },
+    ];
+  }
+
+  // Short but wide: the width the detail gave up goes back to the two queues.
+  // A narrow window still collapses to one column rather than two cramped ones.
+  if (!roomForDetail && two >= MIN_LIST * 2) {
+    const left = Math.floor(two / 2);
+    return [
+      { kind: 'list', pane: 'incoming', width: left },
+      { kind: 'list', pane: 'working', width: two - left },
     ];
   }
 
@@ -62,7 +75,7 @@ export function boardColumns(cols: number): Column[] {
 
 export function renderBoard(cols: number, height: number, tickValue: number): string[] {
   if (height < 3) return [];
-  const columns = boardColumns(cols);
+  const columns = boardColumns(cols, height);
 
   const rendered = columns.map((column) =>
     column.kind === 'list'
@@ -109,7 +122,7 @@ function renderList(pane: TaskState, w: number, h: number, tickValue: number): s
   } else {
     visible.forEach((task, index) => {
       const isCursor = focused && offset + index === cursorFor(pane);
-      body.push(...renderRow(task, inner, isCursor, selectedSet.value.has(task.id), color, tickValue));
+      body.push(...renderRow(task, inner, isCursor, color, tickValue));
     });
   }
 
@@ -154,7 +167,9 @@ function renderFlyout(w: number, boardHeight: number, tickValue: number): string
   } else {
     visible.forEach((task, index) => {
       const isCursor = offset + index === cursorFor('done');
-      body.push(...renderRow(task, inner, isCursor, selectedSet.value.has(task.id), color, tickValue));
+      // A finished chain is listed by the task it came in as — the last step is
+      // whatever tool happened to close it, which is not what you scan for.
+      body.push(...renderRow(task, inner, isCursor, color, tickValue, rootOf(task, getTask)));
     });
   }
 
@@ -175,7 +190,6 @@ function renderDetail(w: number, h: number, tickValue: number): string[] {
   const inner = Math.max(1, w - 4);
   const bodyHeight = Math.max(0, h - 2);
   const task = cursorTask.value;
-  const picked = selectedTasks.value;
   const body: string[] = [];
   /** Live tool output — kept out of `body` so trimming cannot swallow it. */
   const tail: string[] = [];
@@ -184,7 +198,10 @@ function renderDetail(w: number, h: number, tickValue: number): string[] {
     const color = stateColor[task.state];
     const chain = chainOf(task, getTask);
 
-    for (const line of wrap(taskTitle(task), inner).slice(0, 2)) body.push(t.title(line));
+    // Done rows are listed by their root, so the headline follows — the meta
+    // line below still describes the step the chain ended on.
+    const headline = task.state === 'done' ? (chain[0] ?? task) : task;
+    for (const line of wrap(taskTitle(headline), inner).slice(0, 2)) body.push(t.title(line));
     body.push(
       [
         color(`[${task.state}]`),
@@ -196,15 +213,6 @@ function renderDetail(w: number, h: number, tickValue: number): string[] {
         .filter(Boolean)
         .join(t.dim(' · ')),
     );
-
-    if (picked.length > 1) {
-      body.push('');
-      body.push(t.accent(`✓ ${picked.length} selected — r runs a tool on all of them`));
-      for (const other of picked.slice(0, 3)) {
-        body.push(`  ${t.muted(truncate(taskTitle(other), inner - 2))}`);
-      }
-      if (picked.length > 3) body.push(t.dim(`  +${picked.length - 3} more`));
-    }
 
     body.push('');
     for (const line of wrap(task.data.replace(/\s+$/, ''), inner)) body.push(t.text(line));
@@ -301,12 +309,16 @@ function renderRow(
   task: Task,
   inner: number,
   isCursor: boolean,
-  isSelected: boolean,
   color: (text: string) => string,
   tickValue: number,
+  /**
+   * What the row reads its title and provenance from, when that isn't the task
+   * itself — the completed flyout labels a chain by its root.
+   */
+  display: Task = task,
 ): string[] {
-  const marker = isCursor ? color('▸') : isSelected ? t.accent('✓') : ' ';
-  const title = taskTitle(task);
+  const marker = isCursor ? color('▸') : ' ';
+  const title = taskTitle(display);
   const titleText = isCursor ? t.text(truncate(title, inner - 2)) : t.muted(truncate(title, inner - 2));
   const head = `${marker} ${titleText}`;
 
@@ -320,7 +332,7 @@ function renderRow(
     const room = inner - 2 - width(left) - 1;
     detail = room > 6 && tail ? `${left} ${t.dim(truncate(tail, room))}` : left;
   } else {
-    const left = `${t.source(task.source)} ${t.dim('·')} ${t.dim(ago(task.created_at))}`;
+    const left = `${t.source(display.source)} ${t.dim('·')} ${t.dim(ago(display.created_at))}`;
     const flag = task.meta.error ? t.error('failed') : task.meta.recovered_at ? t.warn('recovered') : '';
     const room = inner - 2 - width(left);
     detail = flag && room > width(flag) + 1 ? `${left}${padStart(flag, room)}` : left;

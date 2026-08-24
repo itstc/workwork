@@ -1,3 +1,4 @@
+import { cleanupChains } from '../core/cleanup.ts';
 import { copyToClipboard } from '../core/clipboard.ts';
 import { clearNotices, notify } from '../core/notify.ts';
 import { cancelRun, runForTask, runTool } from '../core/runner.ts';
@@ -20,22 +21,20 @@ import type { Key } from './keys.ts';
 import { isPrintable } from './keys.ts';
 import { panelHeight, renderHelp, renderPanel, renderViewer } from './overlays.ts';
 import { size, tick } from './screen.ts';
-import type { MenuItem, ViewerOverlay } from './state.ts';
+import type { MenuItem, MenuOverlay, ViewerOverlay } from './state.ts';
 import {
-  clearSelection,
   cursorTask,
   cyclePane,
   doneOpen,
   focusPane,
   focusedList,
   focusedPane,
+  menuItems,
   moveCursor,
   overlay,
-  selection,
   setCursor,
   targetTasks,
   toggleDone,
-  toggleSelected,
 } from './state.ts';
 import { t } from './theme.ts';
 
@@ -64,11 +63,9 @@ export function render(): string[] {
       total > bodyHeight
         ? `${current.scroll + 1}–${Math.min(total, current.scroll + bodyHeight)} of ${total}`
         : 'all';
-    const ticked = current.picked.length;
     return frame(cols, rows, lines, [
       ['↑↓', 'step'],
-      ['space', ticked ? `ticked ${ticked}` : 'tick'],
-      ['⏎', ticked ? `copy ${ticked}` : 'copy step'],
+      ['⏎', 'copy step'],
       ['v', 'split here'],
       ['esc', 'close'],
       ['', t.dim(position)],
@@ -76,7 +73,9 @@ export function render(): string[] {
   }
 
   const panel = current ? renderPanel(current, cols) : [];
-  const boardHeight = Math.max(3, rows - 4 - panel.length);
+  // The panel is the thing being interacted with, so a short window shrinks the
+  // board away under it instead of pushing the panel off the bottom.
+  const boardHeight = Math.max(0, rows - 4 - panel.length);
 
   const lines = [
     headerLine(cols),
@@ -99,13 +98,12 @@ function frame(cols: number, rows: number, body: string[], hints: [string, strin
 
 function boardHints(): [string, string][] {
   const pane = focusedPane.value;
-  const count = selection.value.length;
   const hints: [string, string][] = [
     ['↑↓', 'move'],
     ['←→', 'pane'],
     ['⏎', 'view'],
     ['n', 'new'],
-    ['r', count > 0 ? `run on ${count}` : 'run tool'],
+    ['r', 'run tool'],
   ];
   if (pane === 'working') hints.push(['x', 'cancel']);
   else if (pane === 'done') hints.push(['u', 'reopen'], ['3 / esc', 'close']);
@@ -132,8 +130,21 @@ function prompt(
   };
 }
 
-function menu(title: string, items: MenuItem[], subtitle?: string): void {
-  overlay.value = { kind: 'menu', title, subtitle, items, index: 0 };
+function menu(
+  title: string,
+  items: MenuItem[],
+  subtitle?: string,
+  options: { search?: boolean } = {},
+): void {
+  overlay.value = {
+    kind: 'menu',
+    title,
+    subtitle,
+    items,
+    index: 0,
+    // A searching menu starts on an empty filter, which shows everything.
+    filter: options.search ? '' : undefined,
+  };
 }
 
 function newTask(): void {
@@ -158,28 +169,27 @@ function newTask(): void {
 function startTool(tool: Tool, targets: Task[] = targetTasks()): void {
   const live = targets.filter((task) => getTask(task.id));
   if (live.length === 0) {
-    notify('info', targets.length ? 'those tasks are gone' : 'no task selected');
+    notify('info', targets.length ? 'that task is gone' : 'no task under the cursor');
     return;
   }
 
-  const chosen = tool.accepts === 'one' ? live.slice(0, 1) : live;
-  const label =
-    chosen.length === 1 ? taskTitle(chosen[0]!) : `${chosen.length} tasks`;
+  const label = taskTitle(live[0]!);
 
   const launch = (input: string) => {
-    clearSelection();
     overlay.value = null;
     focusPane('working');
-    void runTool(tool, chosen, input);
+    void runTool(tool, live, input);
   };
 
-  if (tool.input) {
+  const spec = typeof tool.input === 'function' ? tool.input(live) : tool.input;
+
+  if (spec) {
     const ask = () => {
       prompt(`${tool.name} — ${label}`, {
-        hint: `${tool.input?.prompt}${tool.input?.placeholder ? `  (default: ${tool.input.placeholder})` : ''}`,
+        hint: `${spec.prompt}${spec.placeholder ? `  (default: ${spec.placeholder})` : ''}`,
         onSubmit: (value) => {
-          if (tool.input?.required && !value.trim()) {
-            notify('error', `${tool.name} needs ${tool.input.prompt.toLowerCase()}`);
+          if (spec.required && !value.trim()) {
+            notify('error', `${tool.name} needs ${spec.prompt.toLowerCase()}`);
             // Required means required — keep asking rather than dropping them
             // back on the board with nothing started.
             ask();
@@ -197,28 +207,23 @@ function startTool(tool: Tool, targets: Task[] = targetTasks()): void {
 }
 
 function openTools(targets: Task[] = targetTasks()): void {
-  if (targets.length === 0) {
+  const task = targets[0];
+  if (!task) {
     notify('info', 'nothing to work on');
     return;
   }
 
-  const subtitle =
-    targets.length === 1
-      ? `on: ${taskTitle(targets[0]!)}`
-      : `on ${targets.length} selected tasks`;
-
+  // Every tool is listed and typing narrows the list, so a tool needs nothing
+  // but a name to be reachable — no shortcut to find a free letter for.
   menu(
     'Run tool',
     tools.map((tool) => ({
-      key: tool.key,
       label: tool.name,
-      description:
-        tool.accepts === 'one' && targets.length > 1
-          ? `${tool.description} (first task only)`
-          : tool.description,
+      description: tool.description,
       run: () => startTool(tool, targets),
     })),
-    subtitle,
+    `on: ${taskTitle(task)}`,
+    { search: true },
   );
 }
 
@@ -263,15 +268,42 @@ function completeTask(): void {
   const targets = targetTasks();
   if (!targets.length) return;
   for (const task of targets) setState(task.id, 'done');
-  clearSelection();
   notify('success', `completed ${targets.length} task${targets.length === 1 ? '' : 's'}`);
+  void tidyUp(targets);
+}
+
+/**
+ * Completing an item finishes the whole chain behind it, so the things its
+ * steps left standing — a herdr tab, an agent holding a pane — are let go too.
+ *
+ * It runs behind the notice rather than in front of it: closing tabs takes a
+ * moment and the board has already moved on. Only the outcome is reported, and
+ * only when there is something to say, since most chains have nothing to
+ * release. A step that wouldn't clean up says so and stays uncleaned, so
+ * completing the task again retries it.
+ */
+async function tidyUp(targets: Task[]): Promise<void> {
+  const report = await cleanupChains(targets);
+
+  const failed = report.failures[0];
+  if (failed) {
+    const rest = report.failures.length - 1;
+    notify(
+      'error',
+      `${failed.toolName}: ${failed.error}${rest > 0 ? ` (+${rest} more)` : ''}`,
+    );
+    return;
+  }
+
+  if (report.cleaned) {
+    notify('info', `cleaned up ${report.cleaned} step${report.cleaned === 1 ? '' : 's'}`);
+  }
 }
 
 function reopenTask(): void {
   const targets = targetTasks();
   if (!targets.length) return;
   for (const task of targets) setState(task.id, 'incoming');
-  clearSelection();
   // Emptying the flyout by reopening everything should not leave it hanging.
   if (doneOpen.value && done.value.length === 0) toggleDone();
   notify('info', `back in the feed: ${targets.length}`);
@@ -304,36 +336,32 @@ function openViewer(): void {
   // Start on the step the board cursor was pointing at, not the root.
   const chain = chainOf(task, getTask);
   const pick = Math.max(0, chain.findIndex((node) => node.id === task.id));
-  const opened: ViewerOverlay = { kind: 'viewer', taskId: task.id, scroll: 0, pick, picked: [] };
+  const opened: ViewerOverlay = { kind: 'viewer', taskId: task.id, scroll: 0, pick };
   overlay.value = { ...opened, scroll: scrollForStep(opened, pick) };
 }
 
-/** The steps a viewer action applies to: the ticked ones, else the cursor's. */
-function viewerSteps(current: ViewerOverlay): Task[] {
+/** The step a viewer action applies to: whichever one the cursor is on. */
+function viewerStep(current: ViewerOverlay): Task | undefined {
   const task = getTask(current.taskId);
-  if (!task) return [];
+  if (!task) return undefined;
   const chain = chainOf(task, getTask);
-  const ticked = chain.filter((node) => current.picked.includes(node.id));
-  if (ticked.length) return ticked;
-  const cursor = chain[Math.min(Math.max(0, current.pick), chain.length - 1)];
-  return cursor ? [cursor] : [];
+  return chain[Math.min(Math.max(0, current.pick), chain.length - 1)];
 }
 
-function copyViewerSteps(current: ViewerOverlay): void {
-  const steps = viewerSteps(current);
-  if (!steps.length) {
+function copyViewerStep(current: ViewerOverlay): void {
+  const step = viewerStep(current);
+  if (!step) {
     notify('error', 'nothing to copy — that task is gone');
     return;
   }
 
-  const text = steps.map((step) => step.data.replace(/\s+$/, '')).join('\n\n');
+  const text = step.data.replace(/\s+$/, '');
   void copyToClipboard(text).then((result) => {
     if (!result.ok) {
       notify('error', `copy failed: ${result.error}`);
       return;
     }
-    const what = steps.length === 1 ? taskTitle(steps[0]!) : `${steps.length} steps`;
-    notify('success', `copied ${what} (${text.length} chars)`);
+    notify('success', `copied ${taskTitle(step)} (${text.length} chars)`);
   });
 }
 
@@ -370,13 +398,7 @@ function splitViewerChain(current: ViewerOverlay): void {
   const nextChain = chainOf(stillThere, getTask);
   const cut = nextChain.findIndex((node) => node.id === at.id);
   const pick = cut >= 0 ? cut : Math.max(0, nextChain.length - 1);
-  const ids = new Set(nextChain.map((node) => node.id));
-  const moved: ViewerOverlay = {
-    ...current,
-    taskId: stillThere.id,
-    pick,
-    picked: current.picked.filter((id) => ids.has(id)),
-  };
+  const moved: ViewerOverlay = { ...current, taskId: stillThere.id, pick };
   overlay.value = { ...moved, scroll: scrollForStep(moved, pick) };
 
   notify('success', `split off "${taskTitle(split.tail)}" — ${taskTitle(split.head)} is back in the feed`);
@@ -463,21 +485,9 @@ function handleBoard(key: Key): void {
     case '3':
       toggleDone();
       return;
-    case 'space': {
-      const task = cursorTask.value;
-      if (task) {
-        toggleSelected(task.id);
-        moveCursor(1);
-      }
-      return;
-    }
     case 'escape':
-      // The flyout is the outermost thing esc should shut, ahead of ticks.
       if (doneOpen.value) toggleDone();
-      else {
-        clearSelection();
-        clearNotices();
-      }
+      else clearNotices();
       return;
     case 'return':
       openViewer();
@@ -575,33 +585,76 @@ function insert(
   });
 }
 
-function handleMenu(key: Key, current: Extract<NonNullable<typeof overlay.value>, { kind: 'menu' }>): void {
+function handleMenu(key: Key, current: MenuOverlay): void {
+  const searching = current.filter !== undefined;
+  const items = menuItems(current);
+  const index = Math.min(Math.max(0, current.index), Math.max(0, items.length - 1));
+
+  const move = (delta: number) => {
+    overlay.value = { ...current, index: Math.min(Math.max(0, index + delta), Math.max(0, items.length - 1)) };
+  };
+
+  const choose = () => {
+    const item = items[index];
+    if (!item) return;
+    overlay.value = null;
+    void item.run();
+  };
+
+  // On a searching menu the letters belong to the filter, so only the keys that
+  // can't be typed — arrows, enter, escape — still steer the list.
+  const filterTo = (value: string) => {
+    overlay.value = { ...current, filter: value, index: 0 };
+  };
+
   switch (key.name) {
     case 'escape':
-    case 'q':
       overlay.value = null;
       return;
     case 'up':
-    case 'k':
-      overlay.value = { ...current, index: Math.max(0, current.index - 1) };
+      move(-1);
       return;
     case 'down':
-    case 'j':
-      overlay.value = { ...current, index: Math.min(current.items.length - 1, current.index + 1) };
+      move(1);
       return;
-    case 'return': {
-      const item = current.items[current.index];
-      overlay.value = null;
-      void item?.run();
+    case 'return':
+      choose();
       return;
-    }
-    default: {
-      const byKey = current.items.find((item) => item.key === key.name);
-      if (byKey) {
+    case 'backspace':
+      if (searching) filterTo((current.filter ?? '').slice(0, -1));
+      return;
+    default:
+      break;
+  }
+
+  if (!searching) {
+    switch (key.name) {
+      case 'q':
         overlay.value = null;
-        void byKey.run();
+        return;
+      case 'k':
+        move(-1);
+        return;
+      case 'j':
+        move(1);
+        return;
+      default: {
+        const byKey = items.find((item) => item.key && item.key === key.name);
+        if (byKey) {
+          overlay.value = null;
+          void byKey.run();
+        }
+        return;
       }
     }
+  }
+
+  if (key.ctrl && key.name === 'u') {
+    filterTo('');
+    return;
+  }
+  if (isPrintable(key)) {
+    filterTo((current.filter ?? '') + (key.name === 'space' ? ' ' : key.sequence));
   }
 }
 
@@ -625,31 +678,12 @@ function handleViewer(key: Key, current: ViewerOverlay): void {
 
   switch (key.name) {
     case 'escape':
-      // First esc drops the ticks, second closes — same as the board.
-      if (current.picked.length) overlay.value = { ...current, picked: [] };
-      else overlay.value = null;
-      return;
     case 'q':
       overlay.value = null;
       return;
     case 'return':
-      copyViewerSteps({ ...current, pick });
+      copyViewerStep({ ...current, pick });
       return;
-    case 'space': {
-      const step = steps[pick];
-      if (!step) return;
-      const picked = current.picked.includes(step.id)
-        ? current.picked.filter((id) => id !== step.id)
-        : [...current.picked, step.id];
-      const next = Math.min(pick + 1, Math.max(0, steps.length - 1));
-      overlay.value = { ...current, picked, pick: next, scroll: scrollForStep(current, next) };
-      return;
-    }
-    case 'a': {
-      const all = steps.length > 0 && current.picked.length === steps.length;
-      overlay.value = { ...current, pick, picked: all ? [] : steps.map((step) => step.id) };
-      return;
-    }
     case 'up':
     case 'k':
       toStep(pick - 1);
