@@ -20,6 +20,16 @@ export interface ToolContext {
   signal: AbortSignal;
   /** Stream progress into the working pane / task viewer. */
   log: (chunk: string) => void;
+  /**
+   * A word for what the run is doing *now*, shown on the working pool row in
+   * place of the spinner's usual "running" reading — `blocked`, for a hand-off
+   * sitting on an agent that stopped to ask. An empty string clears it, which
+   * is what a run says when it starts moving again.
+   *
+   * It is a live annotation on the run, not a result: nothing is written to the
+   * task, and it goes when the run does.
+   */
+  status: (text: string) => void;
 }
 
 /** A post-processed result, linked back to the task it came from. */

@@ -28,6 +28,12 @@ export const t = {
   source: chalk.hex(palette.muted).italic,
   selected: chalk.bgHex('#1f2937'),
   cursor: chalk.bgHex('#312e57'),
+  /**
+   * A run that has stopped and wants a person — read against `warn` (running,
+   * amber) and `error` (failed, red), since blocked is neither: the work is
+   * fine, it just isn't moving without you.
+   */
+  blocked: chalk.hex(palette.accent).bold,
 };
 
 export const stateColor: Record<TaskState, (text: string) => string> = {
@@ -63,6 +69,13 @@ export const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', 
 export function spinner(tick: number): string {
   return SPINNER[tick % SPINNER.length] ?? '⠋';
 }
+
+/**
+ * What stands where the spinner would: a held run is not making progress, and
+ * a marker that doesn't move is the honest way to say so. Same block as the
+ * board's other markers, so it is one column wide wherever they are.
+ */
+export const HELD = '◆';
 
 /** Compact relative time — feeds read better with "3m" than a timestamp. */
 export function ago(iso: string): string {

@@ -13,6 +13,12 @@ export interface ActiveRun {
   startedAt: number;
   /** Tail of the live process output, for the working pane and the viewer. */
   log: string;
+  /**
+   * What the run is waiting on, when that is worth saying on the board —
+   * `blocked` for a herdr hand-off whose agent stopped to ask. Unset means the
+   * run is simply running, which the spinner already says.
+   */
+  status?: string;
 }
 
 /** Runs currently in flight, keyed by run id. */
@@ -91,6 +97,9 @@ export async function runTool(tool: Tool, selected: Task[], rawInput = ''): Prom
       if (!current) return;
       const next = (current.log + chunk).slice(-LOG_LIMIT);
       patchRun(runId, { log: next });
+    },
+    status: (text: string) => {
+      patchRun(runId, { status: text.trim() || undefined });
     },
   };
 

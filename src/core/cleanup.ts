@@ -73,7 +73,9 @@ async function cleanupTask(task: Task, report: CleanupReport): Promise<void> {
   const signal = AbortSignal.timeout(TIMEOUT_MS);
 
   try {
-    await tool.cleanup(task, { signal, log });
+    // A cleanup has no row in the working pool to annotate — the task it is
+    // releasing has already left it — so `status` goes nowhere.
+    await tool.cleanup(task, { signal, log, status: () => {} });
     report.cleaned += 1;
     // Stamped only on success, so a failure is retried next time round.
     stampMeta(task.id, { cleaned_at: new Date().toISOString() });

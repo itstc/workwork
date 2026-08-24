@@ -12,7 +12,7 @@ import {
   doneOpen,
   focusedPane,
 } from './state.ts';
-import { ago, box, duration, spinner, stateColor, stateLabel, stateShort, t } from './theme.ts';
+import { ago, box, duration, HELD, spinner, stateColor, stateLabel, stateShort, t } from './theme.ts';
 
 const MIN_LIST = 18;
 const MIN_DETAIL = 28;
@@ -231,7 +231,9 @@ function renderDetail(w: number, h: number, tickValue: number): string[] {
       const budget = Math.max(1, bodyHeight - spent - 2);
       tail.push(
         '',
-        `${color(spinner(tickValue))} ${t.warn(run.toolName)} ${t.dim(duration(Date.now() - run.startedAt))} ${t.dim('live')}`,
+        run.status
+          ? `${t.blocked(HELD)} ${t.warn(run.toolName)} ${t.dim(duration(Date.now() - run.startedAt))} ${t.blocked(run.status)}`
+          : `${color(spinner(tickValue))} ${t.warn(run.toolName)} ${t.dim(duration(Date.now() - run.startedAt))} ${t.dim('live')}`,
       );
       for (const line of wrap(run.log.slice(-4000), inner).slice(-budget)) tail.push(t.dim(line));
     }
@@ -325,7 +327,14 @@ function renderRow(
   const run = task.state === 'working' ? runForTask(task.id) : undefined;
   let detail: string;
 
-  if (run) {
+  if (run?.status) {
+    // A run that says what it is waiting on has stopped, so the row says that
+    // instead of the tool name and a tail of output that is no longer moving.
+    // The still marker is the point: everything else on this pane is spinning.
+    const held = `${t.blocked(HELD)} ${t.blocked(run.status)} ${t.dim(duration(Date.now() - run.startedAt))}`;
+    const room = inner - 2 - width(held) - 1;
+    detail = room > 6 ? `${held} ${t.muted(truncate(run.toolName, room))}` : held;
+  } else if (run) {
     const elapsed = duration(Date.now() - run.startedAt);
     const tail = lastLogLine(run.log);
     const left = `${color(spinner(tickValue))} ${t.warn(run.toolName)} ${t.dim(elapsed)}`;
@@ -372,7 +381,9 @@ export function headerLine(cols: number): string {
 }
 
 export function statusLine(cols: number): string {
-  const running = Object.values(runs.value).length;
+  const all = Object.values(runs.value);
+  const held = all.filter((run) => run.status).length;
+  const running = all.length - held;
   const parts = feeds.map((feed) => {
     const state = feedStates.value[feed.id];
     const dot = state?.running ? t.success('●') : feed.interactive ? t.muted('○') : t.dim('○');
@@ -381,7 +392,16 @@ export function statusLine(cols: number): string {
   });
 
   const left = ` ${t.dim('feeds')} ${parts.join(t.dim('  '))}`;
-  const right = running > 0 ? `${t.warn(`${running} running`)} ` : '';
+  // Held runs are counted apart from running ones: they are the two different
+  // things "3 running" used to mean, and only one of them wants you.
+  const tally = [
+    held > 0 ? t.blocked(`${held} blocked`) : '',
+    running > 0 ? t.warn(`${running} running`) : '',
+  ]
+    .filter(Boolean)
+    .join(t.dim('  '));
+  const right = tally ? `${tally} ` : '';
+
   const gap = Math.max(0, cols - width(left) - width(right));
   return left + ' '.repeat(gap) + right;
 }

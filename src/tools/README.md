@@ -39,8 +39,13 @@ task that may have been written days ago.
   tasks must exist in the store — either the ones handed in, or a new link the
   tool opened on top of one. (The claude tool does exactly that: the message you
   type becomes a task of its own, and *that* is what sits in the pool.)
-- **`run`** does the work. It gets an `AbortSignal` — so `x` cancels it — and a
-  `log()` callback that streams into the working pane and the viewer live.
+- **`run`** does the work. It gets an `AbortSignal` — so `x` cancels it — a
+  `log()` callback that streams into the working pane and the viewer live, and
+  `status()`, a word for what it is doing *now*. `status()` is for a run that
+  has stopped: a spinner and a tail of output say "running", and a herdr agent
+  sitting on a question is not. What it sets replaces the spinner on the working
+  pool row until it is cleared with `status('')`. Nothing is written to the
+  task — it is a live annotation on the run, and it goes when the run does.
 - **`post`** turns the output into results, each tagged with the `parent` it
   came from. Returning a result closes that parent out; anything a tool declines
   to produce a result for goes back to the feed untouched.
@@ -115,11 +120,14 @@ at a shell prompt:
 flowchart LR
     create["tab create --no-focus"] --> start["agent start, aimed at that pane"]
     start --> prompt["agent prompt --wait"]
-    prompt --> read["agent read"]
+    prompt --> hold{"blocked?"}
+    hold -- "yes" --> wait["agent wait, twice per block"]
+    wait --> hold
+    hold -- "idle / done" --> read["agent read"]
     read --> feed["the task lands back in the feed"]
 ```
 
-Four decisions in there are worth knowing before editing it:
+Five decisions in there are worth knowing before editing it:
 
 - **Re-running is a follow-up, not a fork.** `agentOf` walks back up the chain
   for an agent name; if herdr still knows it, the run is a single `agent prompt`
@@ -128,6 +136,15 @@ Four decisions in there are worth knowing before editing it:
   as long as `run` is pending, so returning at submission time would put it back
   in the feed while the agent was still typing. `--wait` (rather than a separate
   `agent wait`, which races the detector) settles on `idle`/`done` or `blocked`.
+- **`blocked` is a state to sit in, not a result.** A blocked agent has stopped
+  at an approval or a question — the turn is paused, not over — so
+  `holdWhileBlocked` keeps the run pending and tells the board with
+  `ctx.status`, which is what puts `◆ blocked` on the working pool row. Two
+  waits per block: one for the agent to *leave* blocked (it cannot spin, since
+  `agent wait` matches the state the agent is in now), then one for wherever it
+  settles next — often the following question. The whole turn shares one
+  `WORKWORK_HERDR_AGENT_WAIT_MS` budget, and running it out lands the blocked
+  result that used to land immediately.
 - **The pane is the transcript.** herdr has none to ask for, so `readBack` takes
   a snapshot and `tidySnapshot` trims the input box off the foot of it, keeping
   the last `WORKWORK_HERDR_READ_LINES` — counted back from the box, because the

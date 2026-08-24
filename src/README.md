@@ -55,7 +55,7 @@ The interactive path is a startup and shutdown pair:
 ```mermaid
 flowchart TD
     load["load()"] --> autosave["autosave()"] --> feeds["startAutoFeeds()"] --> screen["screen.start with render + handleKey"]
-    screen -- "SIGINT / SIGTERM / q / ^c" --> shutdown["shutdown()"]
+    screen -- "SIGINT / SIGTERM / ^c" --> shutdown["shutdown()"]
     shutdown --> a["screen.stop"] --> b["autosave off"] --> c["cancelAll"] --> d["stopAllFeeds"] --> e["flush"] --> f["exit"]
 ```
 

@@ -100,8 +100,11 @@ flowchart LR
 
 It also owns `runs`, the signal of what is in flight — that is what the spinner,
 the elapsed time and the live output tail in the working pane are reading. Each
-run gets an `AbortController` (so `x` can cancel it) and a `log` callback that
-appends to a 64KB rolling tail.
+run gets an `AbortController` (so `x` can cancel it), a `log` callback that
+appends to a 64KB rolling tail, and a `status` callback for a run that has
+stopped and wants a person — a herdr agent that hit an approval. Setting it
+swaps the row's spinner for a still marker and that word, so the pool can say
+`blocked` about something it is deliberately still holding.
 
 Three failure paths are deliberate rather than incidental: a throwing `pre`
 aborts the run with a notice and nothing enters the pool; a throwing `run`

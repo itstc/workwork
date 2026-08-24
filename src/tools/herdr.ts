@@ -14,6 +14,12 @@ const WAIT_MS = Number(
 /** How much of the agent's pane is read back into the task when its turn ends. */
 const READ_LINES = Number(process.env.WORKWORK_HERDR_READ_LINES ?? 200);
 /**
+ * How much of the pane goes into the run's log when the agent stops to ask —
+ * enough for the question itself, not the turn that led up to it. The board is
+ * showing this live, under a row that is already saying `blocked`.
+ */
+const BLOCKED_LINES = 12;
+/**
  * The input box at the foot of the pane, in lines: the rule, the line you type
  * on, the closing rule, the agent's status line, and whatever hint it hangs
  * under that. It is the window `tidySnapshot` scans for the box's top rule.
@@ -115,9 +121,9 @@ export const herdrTool: Tool = {
  * wanted. Only if that agent is gone from herdr does a fresh one get started.
  *
  * Either way the run then waits, so the task sits in the working pool for as
- * long as the agent is actually working on it and comes back to the feed at the
- * point there is something to see: the turn finished, or the agent stopped to
- * ask. See `submitPrompt`.
+ * long as the agent has the work — through an agent that stops to ask, which is
+ * a pause in the turn and not the end of it — and comes back to the feed when
+ * the agent is idle or done. See `takeTurn` and `holdWhileBlocked`.
  *
  * At that point the pane is read back with `herdr agent read`, and what the
  * agent said is what the task carries into the feed — so a finished turn, or
@@ -224,16 +230,15 @@ export const herdrAgentTool: Tool = {
       };
     }
 
-    // The agent is up and idle: hand it the task, then read back what it did
-    // with it once the wait says the turn is over.
-    const prompted = text ? await submitPrompt(name, text, ctx) : undefined;
-    if (prompted) transcript.push(prompted.output.trim());
-    const said = prompted?.ok ? await readBack(name, ctx) : "";
+    // The agent is up and idle: hand it the task and hold until the turn is
+    // genuinely over, then read back what it did with it.
+    const turn = text ? await takeTurn(name, text, ctx) : undefined;
+    if (turn) transcript.push(turn.sent.output.trim());
 
     return {
-      ok: prompted ? prompted.ok : true,
+      ok: turn ? turn.sent.ok : true,
       output: transcript.filter(Boolean).join("\n") || "(no output)",
-      exitCode: prompted ? prompted.exitCode : started.exitCode,
+      exitCode: turn ? turn.sent.exitCode : started.exitCode,
       meta: {
         label,
         agent: name,
@@ -242,9 +247,10 @@ export const herdrAgentTool: Tool = {
         tab,
         terminal,
         prompt: text || undefined,
-        prompted: Boolean(prompted?.ok),
-        status: prompted ? statusOf(prompted.stdout) : undefined,
-        said: said || undefined,
+        prompted: Boolean(turn?.sent.ok),
+        status: turn?.status,
+        blocks: turn?.blocks || undefined,
+        said: turn?.said || undefined,
       },
     };
   },
@@ -262,17 +268,13 @@ export const herdrAgentTool: Tool = {
     const prompted = run.meta?.prompted === true;
     const status = typeof run.meta?.status === "string" ? run.meta.status : "";
     const said = typeof run.meta?.said === "string" ? run.meta.said : "";
+    const blocks = typeof run.meta?.blocks === "number" ? run.meta.blocks : 0;
 
     const where =
       `herdr agent "${name}" (${AGENT_KIND})` +
       (pane ? ` in pane ${pane}` : "");
     // How the agent's turn ended is the reason this is back in the feed at all.
-    const settled =
-      status === "blocked"
-        ? " It stopped to ask something."
-        : status
-          ? " Its turn is done."
-          : "";
+    const settled = settlement(status, blocks);
     const header =
       (reused
         ? sent === bodyOf(task)
@@ -327,6 +329,9 @@ export const herdrAgentTool: Tool = {
           prompt: sent || undefined,
           prompted: run.meta?.prompted,
           status: status || undefined,
+          // Only worth recording when it happened: a turn nobody had to answer
+          // is the ordinary case and says nothing by saying "0".
+          blocks: blocks || undefined,
         },
       },
     ];
@@ -367,6 +372,24 @@ export const herdrAgentTool: Tool = {
 };
 
 /**
+ * How the turn ended, as the sentence the result opens with.
+ *
+ * `blocked` only reaches here when the hold gave up on it — the budget ran out,
+ * or herdr lost the agent — so it still reads as "go and look at that pane".
+ * Anything else that isn't a finish is the same thing said about a turn that
+ * was still moving when workwork stopped watching.
+ */
+function settlement(status: string, blocks: number): string {
+  if (status === "blocked") return " It stopped to ask something.";
+  if (status === "idle" || status === "done") {
+    return blocks > 0
+      ? ` Its turn is done — it stopped to ask ${blocks === 1 ? "once" : `${blocks} times`} on the way.`
+      : " Its turn is done.";
+  }
+  return status ? ` It is still ${status} — the wait ran out.` : "";
+}
+
+/**
  * A follow-up into the agent already on the task. One call, no layout: the pane
  * is already there and, as far as the agent is concerned, this is the next
  * thing said in a conversation it is halfway through.
@@ -394,18 +417,18 @@ async function promptExisting(
     };
   }
 
-  const sent = await submitPrompt(name, text, ctx);
-  const said = sent.ok ? await readBack(name, ctx) : "";
+  const turn = await takeTurn(name, text, ctx);
   return {
-    ok: sent.ok,
-    output: sent.output.trim() || "(no output)",
-    exitCode: sent.exitCode,
+    ok: turn.sent.ok,
+    output: turn.sent.output.trim() || "(no output)",
+    exitCode: turn.sent.exitCode,
     meta: {
       ...meta,
       prompt: text,
-      prompted: sent.ok,
-      status: statusOf(sent.stdout),
-      said: said || undefined,
+      prompted: turn.sent.ok,
+      status: turn.status,
+      blocks: turn.blocks || undefined,
+      said: turn.said || undefined,
     },
   };
 }
@@ -483,15 +506,162 @@ function pause(ms: number, signal: AbortSignal): Promise<void> {
 }
 
 /**
- * Submit the task, then hold until herdr says the agent has settled.
+ * The whole turn: submit the task, hold the working pool until the agent is
+ * done with it, then read back what it said.
  *
- * The wait is what keeps the item in the working pool: `runTool` leaves a task
- * `working` for exactly as long as `run` is pending, so returning at submission
- * time put the task back in the feed while the agent was still typing. herdr
- * settles on `idle`/`done` — the turn is over — or `blocked`, where it has
- * stopped to ask something, and both are the moment the task is worth a look
- * again. Cancelling the run (`x`) only stops the waiting: the agent is a
+ * The holding is what keeps the item in the working pool — `runTool` leaves a
+ * task `working` for exactly as long as `run` is pending, so returning at
+ * submission time put the task back in the feed while the agent was still
+ * typing. Cancelling the run (`x`) only stops the waiting: the agent is a
  * process in its own pane and keeps going, and the pane is still there.
+ *
+ * The whole turn shares one budget, `WORKWORK_HERDR_AGENT_WAIT_MS`, taken from
+ * the moment of submission rather than restarted by each wait inside it — an
+ * agent that stops to ask five times is one turn taking a long time, not five
+ * fresh half-hours.
+ *
+ * A submission that failed is the answer on its own: nothing is being waited
+ * for and there is no turn to read back.
+ */
+async function takeTurn(
+  name: string,
+  text: string,
+  ctx: ToolContext,
+): Promise<Turn> {
+  const deadline = Date.now() + WAIT_MS;
+
+  const sent = await submitPrompt(name, text, ctx);
+  if (!sent.ok) {
+    return { sent, status: statusOf(sent.stdout), blocks: 0, said: "" };
+  }
+
+  const held = await holdWhileBlocked(name, statusOf(sent.stdout), ctx, deadline);
+  return { sent, ...held, said: await readBack(name, ctx) };
+}
+
+/** One hand-off's worth of conversation with the agent. */
+interface Turn {
+  sent: ExecResult;
+  /** Where the agent ended up: `idle`/`done`, or `blocked` if the hold gave up. */
+  status: string | undefined;
+  /** How many times it stopped to ask on the way there. */
+  blocks: number;
+  /** What it said, read off its pane. */
+  said: string;
+}
+
+/**
+ * Sit on a blocked agent rather than reporting it.
+ *
+ * herdr settles a wait on `idle`/`done` — the turn is over — or on `blocked`,
+ * and the two are not the same news. A blocked agent has not finished anything:
+ * it has stopped at an approval or a question and is waiting on a person in its
+ * pane. Ending the run there closed the task out and put the result in the
+ * incoming feed, so an item left the working pool while the work it names was
+ * still half-done, and the only way to carry on was to run the tool again on
+ * the result of being interrupted.
+ *
+ * So `blocked` is a state to sit in. The run stays pending — which is what
+ * holds the task in the pool — and says what it is sitting on with
+ * `ctx.status`, so the row reads `blocked` rather than being one more spinner
+ * on a board of agents that are actually typing. The task goes back to the feed
+ * when the agent is genuinely idle or done, or when the turn's budget runs out,
+ * which lands exactly the blocked result the old behaviour landed immediately.
+ *
+ * Two waits per block rather than one `--until idle --until done`, because the
+ * indicator has to be able to go out again: the first waits for the agent to
+ * *leave* blocked, the second for wherever it settles next — which is often
+ * blocked again on the following question, and round it goes. It cannot spin:
+ * `agent wait` matches the state the agent is in *now*, so the leaving wait can
+ * never match the `blocked` it was started from.
+ */
+async function holdWhileBlocked(
+  name: string,
+  settled: string | undefined,
+  ctx: ToolContext,
+  deadline: number,
+): Promise<{ status: string | undefined; blocks: number }> {
+  let status = settled;
+  let blocks = 0;
+
+  while (status === "blocked" && !ctx.signal.aborted) {
+    blocks++;
+    ctx.status("blocked");
+    ctx.log(`\n[${name} stopped to ask — holding the task in the pool]\n`);
+    await showBlocker(name, ctx);
+
+    // Wait for a person to answer it. Anything but `blocked`, since that is
+    // where it is standing and would match the moment it was asked for.
+    const moved = await waitFor(name, ["working", "idle", "done"], ctx, deadline);
+    if (!moved) break;
+
+    ctx.status("");
+    status = statusOf(moved.stdout);
+    ctx.log(`[${name} is ${status ?? "moving"} again]\n`);
+
+    // It answered and went straight back to idle on some of these — only a turn
+    // that is actually running needs waiting out.
+    if (status !== "idle" && status !== "done") {
+      const next = await waitFor(name, [], ctx, deadline);
+      if (!next) break;
+      status = statusOf(next.stdout);
+    }
+  }
+
+  ctx.status("");
+  return { status, blocks };
+}
+
+/**
+ * `herdr agent wait`, bounded by what is left of the turn's budget.
+ *
+ * An empty `until` takes herdr's own default — idle, done or blocked, i.e.
+ * wherever the turn settles next. Anything that is not a match comes back
+ * undefined and ends the hold: the budget gone, herdr no longer knowing the
+ * agent because its pane was closed, the CLI falling over. None of those are
+ * failures of the turn — the pane is still there either way — so the result
+ * just says where the agent was when workwork stopped watching it.
+ */
+async function waitFor(
+  name: string,
+  until: string[],
+  ctx: ToolContext,
+  deadline: number,
+): Promise<ExecResult | undefined> {
+  const left = deadline - Date.now();
+  if (left <= 0) {
+    ctx.log(`[the ${WAIT_MS}ms wait on ${name} ran out]\n`);
+    return undefined;
+  }
+
+  const args = ["agent", "wait", name, "--timeout", String(Math.ceil(left))];
+  for (const state of until) args.push("--until", state);
+
+  // Past herdr's own deadline, for the same reason `submitPrompt` is: a wait
+  // that ran out should come back as herdr's `timeout`, not a killed CLI.
+  const waited = await herdr(args, ctx, left + 30_000);
+  if (waited.ok) return waited;
+
+  ctx.log(
+    `[stopped waiting on ${name}: ${waited.output.trim() || `exit ${waited.exitCode}`}]\n`,
+  );
+  return undefined;
+}
+
+/**
+ * What the agent stopped on, into the run's log, so the question is readable in
+ * the detail panel while the task is still held in the pool — the row says the
+ * agent is blocked, and this is what it is blocked on. Bounded hard: the answer
+ * to a question is given in the pane, not here.
+ */
+async function showBlocker(name: string, ctx: ToolContext): Promise<void> {
+  const asked = await readBack(name, ctx);
+  if (!asked) return;
+  ctx.log(`\n${asked.split("\n").slice(-BLOCKED_LINES).join("\n")}\n\n`);
+}
+
+/**
+ * Submit the task and wait for the agent to settle on something.
  *
  * `prompt --wait` rather than a separate `agent wait`: it anchors the wait at
  * the submission. A standalone wait races the detector — the agent is idle at

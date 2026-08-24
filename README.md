@@ -223,7 +223,7 @@ what you typed, so no tool carries a shortcut of its own. Shipped tools:
 | --- | --- |
 | **claude** | a conversation: the message you type becomes a task in the working pool, claude's reply comes back to the feed, and replying again resumes the same claude session |
 | **herdr tab** | runs `herdr tab create --label <name>` to open a tab for the task, to work by hand; completing the task closes that tab again |
-| **herdr agent** | opens the same tab, runs `herdr agent start <name> --kind <kind> --pane <id>` in it, then submits the task with `herdr agent prompt --wait`, handing the work to an agent instead of a person and holding the working pool until that agent finishes its turn or stops to ask; the pane is then read back with `herdr agent read`, so what the agent said is the task that lands in the feed; run it again on the same task and it talks to that agent rather than starting another; completing the task closes the pane the agent is running in, which ends the agent |
+| **herdr agent** | opens the same tab, runs `herdr agent start <name> --kind <kind> --pane <id>` in it, then submits the task with `herdr agent prompt --wait`, handing the work to an agent instead of a person and holding the working pool until that agent is idle or done — an agent that stops to ask keeps its place in the pool, marked `◆ blocked`, rather than coming back as a result; the pane is then read back with `herdr agent read`, so what the agent said is the task that lands in the feed; run it again on the same task and it talks to that agent rather than starting another; completing the task closes the pane the agent is running in, which ends the agent |
 | **bash** | runs a shell command to completion and staples the output onto the task(s); works on a multi-selection |
 
 ### Talking to claude
@@ -276,13 +276,42 @@ The submission waits, and that is what keeps the task in the working pool: a
 task is `working` for exactly as long as the tool's `run` is pending, so
 returning at submission time put the item back in the feed while the agent was
 still typing. herdr settles the wait on `idle`/`done` — the turn is over — or
-`blocked`, where the agent has stopped at an approval or a question, and both
-are the moment the task is worth looking at again. The state it settled on is
-written to the result's meta as `status`, and a blocked agent says so in the
-result's title rather than looking like an ordinary finish. Cancelling the run
-(`x`) only stops the waiting: the agent is a process in its own pane, and it
-keeps going with the pane still there to be picked up by hand. The wait is
-bounded by `WORKWORK_HERDR_AGENT_WAIT_MS` (default 30 minutes).
+`blocked`, where the agent has stopped at an approval or a question. Cancelling
+the run (`x`) only stops the waiting: the agent is a process in its own pane,
+and it keeps going with the pane still there to be picked up by hand.
+
+Those two settlements are not the same news, so only one of them ends the run.
+A blocked agent has finished nothing: it is paused mid-turn on an answer that
+only a person in that pane can give. Coming back at the block put the item in
+the incoming feed as a *result*, so a task left the working pool while the work
+it names was still half-done, and the way to carry on was to run the tool again
+on the result of being interrupted. So a blocked agent keeps its place in the
+pool, and its row says what it is doing there:
+
+    ▸ fix the auth bug
+      ◆ blocked 1m32s
+
+The marker does not move, because neither does the agent — everything else in
+that pool is a spinner. The question it stopped on is read off the pane into the
+run's log, so the detail panel shows what it is waiting for without going to the
+pane; `1 blocked` is counted apart from `n running` in the status bar. The hold
+ends when the agent is genuinely `idle`/`done`, and the result then says it was
+held up on the way ("*Its turn is done — it stopped to ask twice on the way.*").
+
+Under it are two `herdr agent wait` calls per block: the first waits for the
+agent to *leave* blocked, the second for wherever it settles next — often the
+next question, and round it goes. It is two rather than one
+`--until idle --until done` so the indicator can go out again when the agent is
+moving, and it cannot spin, because `agent wait` matches the state the agent is
+in *now* and the leaving wait never asks for the `blocked` it started from.
+
+The whole turn shares one `WORKWORK_HERDR_AGENT_WAIT_MS` budget (default 30
+minutes), counted from the submission rather than restarted by each wait inside
+it — an agent that stops to ask five times is one turn taking a long time, not
+five fresh half-hours. Running that budget out lands exactly the blocked result
+that used to land immediately: `status: blocked` in the meta, and a title that
+says so rather than looking like an ordinary finish. So does herdr losing the
+agent, since a pane someone closed is not going to answer anything.
 
 Then the pane is read back — `herdr agent read <name> --source recent-unwrapped`
 — and *that* is the body of the task that goes to the feed. herdr has no
@@ -463,6 +492,14 @@ Verified end to end, both headlessly and by driving the real binary under a pty:
   arrives still fails and says how long it waited, any other start failure comes
   straight back without sitting on it, and re-running a failed hand-off sends
   the work rather than the error it came back with
+- the blocked hold, against a stub herdr walking scripted state sequences — 25
+  checks: an answered block settles on `idle` without the task ever leaving the
+  working pool, two questions in one turn are both held and both counted, the
+  row is told `blocked` and told again when the agent moves, the leaving wait
+  never asks for `blocked` (so the loop cannot spin), an unanswered block still
+  lands the old blocked result with its question read back, a budget spent
+  across waits ends the hold instead of starting another, and a turn nobody had
+  to answer issues no waits at all
 - the herdr agent read-back, against a stub herdr — 22 checks: the pane becomes
   the task on a first hand-off, a blank re-run, a typed follow-up and a turn
   that settles `blocked`; the request stays what a blank re-run resends rather
@@ -483,7 +520,11 @@ Two things to know:
   follow-up into a live agent, the fall-through that starts a new agent when
   `agent get` says the old one is gone, and a turn that settles on `blocked`
   instead of `done`. The task holds the working pool for the whole turn in each
-  case. `agent read` has been run against a real herdr for its arguments and
+  case. `agent wait`'s semantics were confirmed against the same herdr — it
+  matches the state the agent is in *now*, and answers with the same
+  `result.agent.agent_status` shape `statusOf` already reads — but the hold loop
+  built on it is covered by the stub, not yet by a live agent stopping to ask.
+  `agent read` has been run against a real herdr for its arguments and
   output shape, but the read-back's own end-to-end pass — a real agent's turn
   becoming the task — is covered by the stub, not yet by a live agent.
 - **`agent start` used to lose a race with the shell in a tab just created.**

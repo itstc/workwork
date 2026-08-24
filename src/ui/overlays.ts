@@ -6,7 +6,7 @@ import { chainOf, taskTitle } from '../core/task.ts';
 import { fit, truncate, width, wrap } from './ansi.ts';
 import type { MenuOverlay, Overlay, ViewerOverlay } from './state.ts';
 import { menuItems } from './state.ts';
-import { ago, box, duration, stateColor, t } from './theme.ts';
+import { ago, box, duration, HELD, stateColor, t } from './theme.ts';
 
 /** Bottom-anchored panels replace whole rows, so nothing needs compositing. */
 export function panelHeight(overlay: Overlay, cols: number): number {
@@ -184,7 +184,11 @@ export function renderViewer(overlay: ViewerOverlay, cols: number, rows: number)
     const run = runForTask(node.id);
     if (run) {
       content.push(lead);
-      content.push(`${lead}   ${t.warn(`▸ ${run.toolName} running — live output`)}`);
+      content.push(
+        run.status
+          ? `${lead}   ${t.blocked(`${HELD} ${run.toolName} ${run.status} — live output`)}`
+          : `${lead}   ${t.warn(`▸ ${run.toolName} running — live output`)}`,
+      );
       for (const line of wrap(run.log.slice(-4000), inner - 4).slice(-40)) {
         content.push(`${lead}   ${t.dim(line)}`);
       }
@@ -267,7 +271,7 @@ export function renderHelp(cols: number, rows: number): string[] {
       'other',
       [
         ['?', 'this help'],
-        ['q / ^c', 'quit (state is saved)'],
+        ['^c', 'quit (state is saved)'],
       ],
     ],
   ];

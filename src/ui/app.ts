@@ -109,7 +109,7 @@ function boardHints(): [string, string][] {
   else if (pane === 'done') hints.push(['u', 'reopen'], ['3 / esc', 'close']);
   else hints.push(['d', 'complete']);
   if (pane !== 'done') hints.push(['3', 'done']);
-  hints.push(['f', 'feeds'], ['?', 'help'], ['q', 'quit']);
+  hints.push(['f', 'feeds'], ['?', 'help'], ['^c', 'quit']);
   return hints;
 }
 
@@ -443,9 +443,6 @@ export function handleKey(key: Key): void {
 
 function handleBoard(key: Key): void {
   switch (key.name) {
-    case 'q':
-      quit();
-      return;
     case '?':
       overlay.value = { kind: 'help' };
       return;

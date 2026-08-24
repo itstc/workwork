@@ -147,6 +147,11 @@ Details worth knowing before editing:
 - **The detail panel budgets live output first.** When a tool is running, its
   output tail is reserved a slice of the panel *before* the static text above is
   trimmed to fit — the newest output being visible is the whole point.
+- **A run that set `status` is drawn still, not spinning.** `renderRow` swaps
+  the spinner and the output tail for `◆ <status>` — a herdr agent that stopped
+  to ask is held in the pool on purpose, and a moving spinner over a tail that
+  stopped moving says the opposite. `statusLine` counts those apart from the
+  running ones for the same reason: only one of the two wants you.
 - **The flyout covers its column outright.** A half-hidden box underneath reads
   as a rendering bug, and the feed's count is still in the header.
 - **Completed rows are labelled by `rootOf`**, not by the task itself: a
