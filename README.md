@@ -1,4 +1,9 @@
-# workwork
+# <img width="154" height="158" alt="peon" src="https://github.com/user-attachments/assets/66c649e3-6af0-4cff-b9b2-3856a560684c" /> workwork 
+
+
+
+https://github.com/user-attachments/assets/66968f76-23cf-41b2-ad52-9ad29621802d
+
 
 A CLI work queue. Connections turn into tasks, tasks get piped through tools, and
 whatever the tool produces comes back to the feed as the next link in the chain.
